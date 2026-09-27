@@ -1,0 +1,33 @@
+{
+  "query": "x402",
+  "source": "DuckDuckGo",
+  "results": [
+    {
+      "title": "X.400",
+      "href": "https://en.wikipedia.org/wiki/X.400",
+      "snippet": "X.400 is a suite of ITU-T recommendations that define the ITU-T Message Handling System (MHS).At one time, the designers of X.400 expected it to be the predominant form of email, but this role has been taken by SMTP-based Internet e-mail. Despite this, it has been widely used within organizations and was a core part of Microsoft Exchange Server until 2006; variants continue to be important in military and aviation contexts."
+    },
+    {
+      "title": "x402 ecosystem",
+      "href": "https://grokipedia.com/page/x402_ecosystem",
+      "snippet": "The x402 ecosystem is the network of open-source projects, protocols, infrastructure, and associated cryptocurrencies built around the x402 payment protocol\u2014an open standard that revives the long-unused HTTP 402 \"Payment Required\" status code to e\u2026"
+    },
+    {
+      "title": "x402",
+      "href": "https://x402.org/",
+      "snippet": "x402 is an open, neutral standard for internet-native payments. It absolves the Internet\u2019s original sin by natively making payments possible between clients and servers, creating win-win economies that empower agentic payments at scale. x402 ..."
+    },
+    {
+      "title": "GitHub - x402-foundation/x402: A payments protocol for the internet. Built on HTTP. \u00b7 GitHub",
+      "href": "https://github.com/x402-foundation/x402",
+      "snippet": "1 month ago - x402 is an open standard for internet native payments."
+    }
+  ],
+  "result_count": 10,
+  "payment": {
+    "amount_xno": "0.000000",
+    "free_trial": true,
+    "trial_remaining": 4,
+    "trial_limit": 5
+  }
+}
