@@ -15,11 +15,41 @@ and it only pays when you plug in a payer.
 
 ```bash
 pip install "git+https://github.com/dhyabi2/gpt-researcher-x402-retriever"
-export RETRIEVER=paypercall          # or combine: RETRIEVER=paypercall,duckduckgo
 ```
 
-GPT Researcher finds the retriever through the `gpt_researcher.retrievers` entry point. You don't
-need to change GPT Researcher.
+**`RETRIEVER=paypercall` alone is not enough, and fails quietly.** GPT Researcher resolves a
+retriever name in `gpt_researcher.actions.retriever.get_retriever`, a hardcoded `match` over its
+built-in names ending in `case _: return None` — it reads no entry points (checked against 0.15.1,
+the current release). `get_retrievers` then does `get_retriever(r) or get_default_retriever()`, so
+an unrecognised name raises nothing and silently becomes **Tavily**, which needs the API key this
+package exists to avoid. The `gpt_researcher.retrievers` entry point is declared here for the day
+upstream reads one.
+
+So the name has to be registered in the same process, which takes one line:
+
+```python
+import gpt_researcher_x402_retriever as x402
+x402.register()                      # now "paypercall" resolves
+
+from gpt_researcher import GPTResearcher
+researcher = GPTResearcher(query="...")        # honours RETRIEVER=paypercall,duckduckgo
+report = await researcher.conduct_research()
+```
+
+`register()` wraps `get_retriever` so `paypercall` answers this class and every other name keeps
+its original answer — a combined `RETRIEVER=paypercall,duckduckgo` still works. It is idempotent,
+and returns `False` instead of raising if GPT Researcher is not importable.
+
+Or skip the name entirely and hand the class over directly:
+
+```python
+researcher = GPTResearcher(query="...")
+researcher.retrievers = [x402.PayPerCallSearch]   # set after construction; there is no kwarg
+```
+
+If you run GPT Researcher as a server or CLI you do not launch yourself, `register()` has to run
+inside that process — import it from your own entry point, or use the `researcher.retrievers`
+assignment where the instance is built. There is no environment-only setup today.
 
 ## What happens on a call
 
@@ -124,8 +154,9 @@ X402_LIVE=1 pytest -m live      # one live check: the endpoint answers 402 with 
 
 The live check never pays. The seller gives each IP 5 free calls a day, so the check may use up
 to 5 of yours before the 402 appears. It then confirms the 402 terms match the seller's published
-`/.well-known/x402`. To run the GPT Researcher resolution test against a checkout, set
-`GPTR_RETRIEVER_PY=<gpt-researcher>/gpt_researcher/actions/retriever.py`.
+`/.well-known/x402`. To run the two GPT Researcher resolution tests against a checkout (or against
+an unpacked wheel), set `GPTR_RETRIEVER_PY=<gpt-researcher>/gpt_researcher/actions/retriever.py`;
+without it they are skipped, and a stand-in copied from 0.15.1 covers the same two assertions.
 
 ## License
 
