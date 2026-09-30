@@ -83,6 +83,7 @@ block is published.
 
 ```python
 # my_payer.py  (nano-wallet-xno's directory on sys.path)
+import uuid
 import payments, nanonode, keystore, wallet
 
 class NanoWalletPayer:
@@ -95,11 +96,25 @@ class NanoWalletPayer:
     def pay(self, offer):
         result = payments.send(
             self.source, offer.pay_to, wallet.raw_to_xno(offer.amount_raw),
-            idempotency_key=f"x402:{offer.resource}:{offer.amount_raw}"[:64],
+            idempotency_key=f"x402:{uuid.uuid4().hex}",
             node=self.node, keys=self.keys, sent=self.sent,
         )
         return result["block_hash"]
 ```
+
+**The key has to be unique per search.** `nano-wallet-xno` treats a repeated
+`idempotency_key` as the same payment and returns the first block hash again
+without sending anything. A key built from the offer alone — the resource and
+the amount — is the same string on every search of the same endpoint at the
+same price, so with one long-lived payer (which is what `set_default_payer`
+gives you) the second search would hand the seller a block hash it has already
+spent, the seller would refuse it, and every paid search after the first would
+come back empty.
+
+The retriever calls `pay()` at most once per `search()` and never retries a
+payment, so a fresh key per call is the right granularity. If you add your own
+retry around `pay()`, compute the key once outside it and pass it in, so a
+retry of *that* call reuses it and cannot pay twice.
 
 ```bash
 export NANO_WALLET_ALLOW_SEND=1 X402_PAYER=my_payer:NanoWalletPayer
