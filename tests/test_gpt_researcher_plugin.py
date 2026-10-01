@@ -1,8 +1,12 @@
-"""GPT Researcher finds this retriever by name through its entry-point group.
+"""How GPT Researcher comes to resolve the name ``paypercall``.
 
-Loads GPT Researcher's own ``actions/retriever.py`` - from the installed package,
-or by path from a checkout named in ``GPTR_RETRIEVER_PY`` - and asks it for
-``paypercall``. Skipped when neither is available.
+The ``gpt_researcher.retrievers`` entry point is declared, and
+``test_entry_point_registers_paypercall`` checks that packaging metadata. But GPT
+Researcher does not read entry points, so the name resolves only after
+``register()``; that is asserted against GPT Researcher's own
+``actions/retriever.py`` - from the installed package, or by path from a checkout
+or unpacked wheel named in ``GPTR_RETRIEVER_PY`` - and against a stand-in copied
+from 0.15.1 when neither is available.
 """
 import importlib.util
 import os
@@ -32,11 +36,6 @@ def test_entry_point_registers_paypercall():
     from importlib.metadata import entry_points
     eps = entry_points(group="gpt_researcher.retrievers", name="paypercall")
     assert [ep.load() for ep in eps] == [PayPerCallSearch]
-
-
-def test_gpt_researcher_resolves_retriever_paypercall():
-    module = _gptr_retriever_module()
-    assert module.get_retriever("paypercall") is PayPerCallSearch
 
 
 class _Tavily:
