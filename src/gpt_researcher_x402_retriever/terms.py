@@ -19,6 +19,9 @@ from typing import Any, Mapping, Optional
 RAW_PER_XNO = 10**30
 NANO_ADDRESS = re.compile(r"^(nano|xrb)_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$")
 BLOCK_HASH = re.compile(r"^[0-9A-Fa-f]{64}$")
+#: An amount in raw is ASCII decimal digits. ``str.isdigit()`` is not that test: it is also true
+#: for "\u00b2", which ``int()`` then refuses, and for "\u0663", which is not what a seller wrote.
+RAW_AMOUNT = re.compile(r"^[0-9]+$")
 _B32 = {c: i for i, c in enumerate("13456789abcdefghijkmnopqrstuwxyz")}
 
 
@@ -101,7 +104,7 @@ def parse_challenge(body: Any, payment_required_header: Optional[str], request_u
         if (accept.get("scheme"), accept.get("network"), accept.get("asset")) != ("exact", "nano:mainnet", "XNO"):
             continue
         amount = accept.get("amount")
-        if not isinstance(amount, str) or not amount.isdigit() or int(amount) <= 0:
+        if not isinstance(amount, str) or not RAW_AMOUNT.match(amount) or int(amount) <= 0:
             raise TermsError(f"offer amount is not a positive integer raw string: {amount!r}")
         pay_to = accept.get("payTo")
         if not valid_nano_address(pay_to):

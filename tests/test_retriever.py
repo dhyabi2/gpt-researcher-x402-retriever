@@ -194,8 +194,14 @@ def test_offers_on_other_rails_are_not_payable(mutate):
         parse_challenge(body, None, DEFAULT_ENDPOINT)
 
 
-@pytest.mark.parametrize("amount", ["0", "-1", "1e26", 1e26, "0.0001", ""])
+@pytest.mark.parametrize("amount", ["0", "-1", "1e26", 1e26, "0.0001", "", "\u00b2", "\u0663"])
 def test_amount_must_be_a_positive_integer_raw_string(amount):
+    """The last two are `str.isdigit()` but not raw.
+
+    `"\u00b2"` is `isdigit()` and not `int()`-able, so the old check reached `int(amount)` and let a
+    bare `ValueError` out of a function whose documented failure is `TermsError` - and `TermsError`
+    subclasses `ValueError`, so `except TermsError` does not catch it.
+    """
     body = fixture("web_search_402.json")
     body["accepts"][0]["amount"] = amount
     with pytest.raises(TermsError):
