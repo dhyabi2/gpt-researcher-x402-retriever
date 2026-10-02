@@ -5,7 +5,7 @@ import pytest
 
 from gpt_researcher_x402_retriever import PayPerCallSearch, set_default_payer
 from gpt_researcher_x402_retriever.retriever import DEFAULT_ENDPOINT
-from gpt_researcher_x402_retriever.terms import TermsError, parse_challenge, xno_to_raw
+from gpt_researcher_x402_retriever.terms import NANO_ADDRESS, TermsError, parse_challenge, xno_to_raw
 
 from conftest import FakeResponse, FakeSession, RecordingPayer, fixture
 
@@ -208,6 +208,30 @@ def test_pay_to_must_be_a_nano_address(pay_to):
     body["accepts"][0]["payTo"] = pay_to
     with pytest.raises(TermsError):
         parse_challenge(body, None, DEFAULT_ENDPOINT)
+
+
+def _one_character_changed(address, index):
+    return address[:index] + ("4" if address[index] != "4" else "5") + address[index + 1:]
+
+
+@pytest.mark.parametrize("index", [12, 40, 64])   # key, key, last checksum character
+def test_pay_to_with_a_broken_checksum_is_refused_before_the_payer_is_asked(index):
+    """One mistyped character keeps the shape and breaks the checksum.
+
+    A Nano address carries a 5-byte blake2b digest of its own public key for exactly this reason.
+    Without checking it, a typo in a seller's 402 is paid to an account nobody holds the key to,
+    and a Nano send cannot be reversed.
+    """
+    pay_to = _one_character_changed(VEND_PAY_TO, index)
+    assert NANO_ADDRESS.match(pay_to), "the shape check alone still accepts this"
+    body = fixture("web_search_402.json")
+    body["accepts"][0]["payTo"] = pay_to
+    with pytest.raises(TermsError):
+        parse_challenge(body, None, DEFAULT_ENDPOINT)
+
+    session, payer = FakeSession(FakeResponse(402, body), ok()), RecordingPayer("b" * 64)
+    assert PayPerCallSearch("x402", payer=payer, session=session).search() == []
+    assert payer.offers == []
 
 
 def test_xno_to_raw_is_exact():
