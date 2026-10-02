@@ -100,3 +100,22 @@ The two passes found disjoint defects, and neither found the other's: this pass 
 package was never called at all (`RETRIEVER=paypercall` silently resolving to Tavily), the other
 found that the payer stopped paying after the first call. Worth saying plainly, because it is the
 argument for a second pass rather than against either one.
+
+**Two more, on 2026-10-02, in code this pass read** (#3 and #4, with
+`gpt-researcher-x402-retriever-2026-10-02.md`):
+
+- **`payTo` was matched for shape but not checksum.** `NANO_ADDRESS` is a grammar; the 5-byte
+  blake2b digest at the end of an address is the only thing that catches a single mistyped
+  character, and a send to a shape-valid address with a bad checksum is irreversible and lands on
+  an account nobody holds the key to. This pass read that line, recorded that `payTo` "must match
+  the Nano address grammar", and did not ask whether the grammar was sufficient — in the same run
+  that had just read a correct checksum implementation in `nano-accept-settle`. Auditing each
+  repository in isolation is what let a finding sit one repository away from where it was needed.
+- **`amount.isdigit()` instead of `^[0-9]+$`.** This pass *did* notice it and judged it too obscure
+  to be worth a change. That judgement was wrong: `"\u00b2".isdigit()` is true and `int()` then
+  raises, so it is a crash path, not just a curiosity, and a non-ASCII digit string is not the
+  number a seller wrote. It cost nothing to fix and came with a test.
+
+The lesson this pass would carry forward: a guard that *checks the shape of* a value that money is
+sent to deserves the question "is the shape sufficient?", and "too obscure to fix" is a weak
+reason to leave a demonstrable crash in a published package.
