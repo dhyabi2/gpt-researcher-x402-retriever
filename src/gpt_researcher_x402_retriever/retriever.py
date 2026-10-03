@@ -6,8 +6,9 @@ call is either inside the seller's free trial, or answered with HTTP 402 and
 x402 terms. On a 402 the retriever asks a pluggable payer to send the exact
 amount in Nano (XNO), then retries once with the block hash in ``X-PAYMENT``.
 
-Registered as the ``paypercall`` retriever through GPT Researcher's
-``gpt_researcher.retrievers`` entry-point group: ``RETRIEVER=paypercall``.
+The ``gpt_researcher.retrievers`` entry point is declared for the day GPT
+Researcher reads one. It does not read one today (see ``register`` below), so
+``register()`` is what makes ``RETRIEVER=paypercall`` resolve.
 """
 
 from __future__ import annotations
@@ -141,6 +142,45 @@ class PayPerCallSearch(_Base):
             raise TermsError(f"402 asks to pay {offer.pay_to}, not the pinned X402_PAY_TO")
         if urlparse(self.endpoint).scheme != "https":
             raise TermsError("refusing to pay over a non-HTTPS endpoint")
+
+
+def register() -> bool:
+    """Make the name ``paypercall`` resolve to this retriever. Call it before ``GPTResearcher(...)``.
+
+    GPT Researcher resolves a retriever name in ``gpt_researcher.actions.retriever.get_retriever``,
+    which is a hardcoded ``match`` ending in ``case _: return None`` (checked against 0.15.1, the
+    current release). It reads no entry points. Worse, ``get_retrievers`` then does
+    ``get_retriever(r) or get_default_retriever()``, so an unrecognised name does not raise — it
+    silently becomes Tavily, which needs the API key this package exists to avoid.
+
+    Returns True once the name resolves, False if GPT Researcher is not installed. Idempotent, and
+    it leaves every other name with its original answer, so a combined
+    ``RETRIEVER=paypercall,duckduckgo`` keeps working.
+    """
+    try:
+        from gpt_researcher.actions import retriever as _gptr
+    except Exception:  # pragma: no cover - depends on the environment
+        logger.warning("gpt_researcher is not importable; RETRIEVER=paypercall will not resolve")
+        return False
+    return _install(_gptr)
+
+
+def _install(module) -> bool:
+    """Wrap ``module.get_retriever`` so ``paypercall`` answers this class. Separated so it is testable."""
+    previous = getattr(module, "get_retriever", None)
+    if previous is None:
+        logger.warning("%s has no get_retriever; RETRIEVER=paypercall will not resolve", module.__name__)
+        return False
+    if getattr(previous, "_paypercall_registered", False):
+        return True
+
+    def get_retriever(retriever: str):
+        return PayPerCallSearch if retriever == "paypercall" else previous(retriever)
+
+    get_retriever._paypercall_registered = True  # type: ignore[attr-defined]
+    get_retriever.__doc__ = previous.__doc__
+    module.get_retriever = get_retriever
+    return True
 
 
 def _json_or_none(response) -> Any:
