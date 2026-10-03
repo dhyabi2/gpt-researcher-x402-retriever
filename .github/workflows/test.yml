@@ -12,4 +12,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[test]"
+      # Best effort: with it, the Feeless402Payer money-path tests run; without it
+      # they skip. It must never fail the build, since it is an optional extra.
+      - run: pip install -e ".[feeless402]" || echo "feeless402 unavailable; payer tests will skip"
       - run: pytest -q
