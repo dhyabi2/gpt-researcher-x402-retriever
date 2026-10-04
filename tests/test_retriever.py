@@ -280,3 +280,61 @@ def test_feeless402_payer_sends_exact_raw_from_the_local_wallet(monkeypatch):
     assert PayPerCallSearch("x402", session=session).search()
     assert len(sent) == 1 and sent[0][1:] == (VEND_PAY_TO, PRICE_RAW)
     assert isinstance(Feeless402Payer().pay.__self__, Feeless402Payer)
+
+
+# -- the 402 must come from somewhere it is safe to pay ----------------------
+#
+# `_check_offer` refuses to "pay over a non-HTTPS endpoint", but it read the
+# scheme off `self.endpoint` -- the URL that was ASKED FOR. `requests` follows
+# redirects by default and does not refuse a scheme downgrade. Measured
+# 2026-10-04 against a local TLS server redirecting to a local plain-HTTP one:
+#
+#     requested : https://localhost:44709/api/v1/web-search
+#     final url : http://127.0.0.1:33733/api/v1/web-search
+#     history   : [302]
+#     status    : 402
+#     payTo     : nano_1banexkcf...   <- read from the PLAIN-HTTP responder
+#
+# So the challenge -- and the Nano address that gets paid -- can come from a
+# different origin over plain HTTP while the guard still reads `https` off the
+# configured endpoint and allows the send. `X402_PAY_TO` would catch it, but it
+# is optional and unset by default.
+
+
+def test_a_402_that_arrived_over_plain_http_is_not_paid():
+    # The configured endpoint is HTTPS; the answer came from somewhere else, over
+    # plain HTTP, exactly as `requests` leaves it after a 302.
+    body = fixture("web_search_402.json")
+    downgraded = FakeResponse(402, body, url="http://evil.example/api/v1/web-search")
+    session, payer = FakeSession(downgraded), RecordingPayer()
+    search = PayPerCallSearch("q", payer=payer, session=session)
+    assert search.search() == []
+    assert payer.offers == [], "nothing may be sent for a 402 that arrived over plain HTTP"
+    assert search.last_payment is None
+    # Only the one request was made: there is no paid retry to make.
+    assert len(session.calls) == 1
+
+
+def test_a_402_from_another_https_origin_is_still_paid_and_the_reason_is_recorded():
+    # The control, so the refusal above cannot be mistaken for "any redirect is
+    # refused". A redirect that stays on HTTPS is still paid: whoever answered
+    # holds a valid certificate for that name, and `X402_PAY_TO` is the knob for
+    # pinning the address. Narrowing that further would refuse a seller that
+    # legitimately redirects to a CDN host, so it is deliberately left alone.
+    body = fixture("web_search_402.json")
+    moved = FakeResponse(402, body, url="https://cdn.paypercall.dev/api/v1/web-search")
+    session, payer = FakeSession(moved, ok()), RecordingPayer("c" * 64)
+    search = PayPerCallSearch("q", payer=payer, session=session)
+    assert len(search.search()) > 0
+    assert [o.amount_raw for o in payer.offers] == [PRICE_RAW]
+
+
+def test_the_https_guard_still_refuses_a_plainly_http_endpoint():
+    # The pre-existing half of the guard, which must keep holding: a response with
+    # no `url` at all (anything that is not a `requests.Response`) falls back to the
+    # configured endpoint rather than skipping the check.
+    body = fixture("web_search_402.json")
+    session, payer = FakeSession(FakeResponse(402, body)), RecordingPayer()
+    search = PayPerCallSearch("q", payer=payer, session=session, endpoint="http://plain.example/search")
+    assert search.search() == []
+    assert payer.offers == []

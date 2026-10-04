@@ -64,7 +64,9 @@ assignment where the instance is built. There is no environment-only setup today
    - the amount is a positive integer raw string, and `payTo` is a well-formed Nano address;
    - the price is at most `X402_MAX_XNO` (default `0.001`);
    - `payTo` equals `X402_PAY_TO`, if you set it;
-   - the endpoint is HTTPS.
+   - the endpoint is HTTPS, **and so is the URL the 402 actually came from** -- `requests` follows
+     redirects, so a 302 could otherwise hand the `payTo` address to a plain-HTTP origin and still
+     pass a check made against the configured endpoint. A redirect that stays on HTTPS is paid.
 4. **With no payer configured (the default), nothing is paid.** The price is logged, and
    `search()` returns `[]`, so GPT Researcher carries on with your other retrievers.
 5. **With a payer**, the payer sends exactly that amount and returns the block hash. The retriever

@@ -113,7 +113,7 @@ class PayPerCallSearch(_Base):
 
         offer = parse_challenge(_json_or_none(response), response.headers.get("payment-required"), self.endpoint)
         self.last_offer = offer
-        self._check_offer(offer)
+        self._check_offer(offer, getattr(response, "url", None))
         payer = resolve_payer(self._payer)
         if payer is None:
             logger.info(
@@ -135,13 +135,33 @@ class PayPerCallSearch(_Base):
             )
         return paid.json()
 
-    def _check_offer(self, offer: PaymentOffer) -> None:
+    def _check_offer(self, offer: PaymentOffer, challenge_url: Optional[str] = None) -> None:
         if offer.amount_raw > self.max_raw:
             raise TermsError(f"price {offer.amount_xno} XNO is above X402_MAX_XNO")
         if self.pay_to is not None and offer.pay_to != self.pay_to:
             raise TermsError(f"402 asks to pay {offer.pay_to}, not the pinned X402_PAY_TO")
         if urlparse(self.endpoint).scheme != "https":
             raise TermsError("refusing to pay over a non-HTTPS endpoint")
+        # And the same test on where the 402 actually CAME FROM, which is not
+        # necessarily what was asked for. `requests` follows redirects by default and
+        # does not refuse a scheme downgrade; measured 2026-10-04 against a local TLS
+        # server answering 302 to a local plain-HTTP one, a GET for
+        # `https://localhost/api/v1/web-search` returned a 402 whose `url` was
+        # `http://127.0.0.1:.../api/v1/web-search` and whose `payTo` was the
+        # plain-HTTP responder's. Checking only `self.endpoint` let that be paid: the
+        # Nano address came from an origin anyone on the path could have rewritten,
+        # and a Nano send is irreversible. `X402_PAY_TO` would have caught it, but it
+        # is optional and unset by default, so this cannot rely on it.
+        #
+        # A redirect that STAYS on HTTPS is still paid. Refusing a cross-origin HTTPS
+        # redirect would refuse a seller that legitimately moves to a CDN host, and
+        # whoever answers over HTTPS holds a certificate for that name; pinning the
+        # address is what `X402_PAY_TO` is for.
+        if challenge_url is not None and urlparse(challenge_url).scheme != "https":
+            raise TermsError(
+                f"the 402 was served over {urlparse(challenge_url).scheme or 'no'} scheme "
+                f"({challenge_url}) -- refusing to pay an address that did not arrive over HTTPS"
+            )
 
 
 def register() -> bool:

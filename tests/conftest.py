@@ -13,11 +13,14 @@ def fixture(name):
 
 
 class FakeResponse:
-    def __init__(self, status_code, body=None, headers=None, text=None):
+    def __init__(self, status_code, body=None, headers=None, text=None, url=None):
         self.status_code = status_code
         self._body = body
         self.headers = {k.lower(): v for k, v in (headers or {}).items()}
         self._text = text
+        #: Where the answer actually came FROM. ``requests`` sets this to the final
+        #: URL after following redirects, which is not necessarily the one asked for.
+        self.url = url
 
     def json(self):
         if self._body is None:
