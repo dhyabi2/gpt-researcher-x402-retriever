@@ -338,3 +338,111 @@ def test_the_https_guard_still_refuses_a_plainly_http_endpoint():
     search = PayPerCallSearch("q", payer=payer, session=session, endpoint="http://plain.example/search")
     assert search.search() == []
     assert payer.offers == []
+
+
+# --- the spend cap was rounded at 28 digits -------------------------------------------------
+#
+# `xno_to_raw` ran the XNO -> raw multiplication in the PROCESS-GLOBAL decimal context, whose
+# `prec` defaults to 28 significant digits, against a raw amount that reaches 39. Its one caller
+# is `PayPerCallSearch.max_raw`, the ceiling a price is refused above, so a rounded answer was a
+# ceiling nobody set -- and `to_integral_value()` could not catch the rounding, because a value
+# rounded at the 28th significant digit is still an integer.
+
+
+def exact_raw(decimal_xno: str) -> int:
+    """The raw amount a cap names, computed from its digits with no Decimal in the way."""
+    whole, _, frac = decimal_xno.partition(".")
+    assert len(frac) <= 30
+    return int(whole or 0) * 10**30 + int(frac.ljust(30, "0") or 0)
+
+
+def test_a_cap_is_not_rounded_up_above_what_was_configured():
+    """The direction that costs something: the cap came back 10 raw ABOVE the ask.
+
+    29 decimal places is a legal whole number of raw, so this cap is one an operator may set and
+    the conversion owes them the number they wrote. The shipped code answered
+    ``100000000000000000000000000000000`` -- exactly 100 XNO -- so a price up to 10 raw above the
+    configured ceiling was paid, and no refusal fired because the rounded value was still an
+    integer.
+    """
+    cap = "99.99999999999999999999999999999"          # 29 decimal places
+    assert xno_to_raw(cap) == exact_raw(cap) == 99999999999999999999999999999990
+    assert xno_to_raw(cap) < 10**32
+
+
+def test_a_cap_at_full_raw_precision_converts_exactly_and_not_sixty_raw_short():
+    cap = "1.00000000000000000000000000006"           # 29 decimal places, a whole number of raw
+    assert xno_to_raw(cap) == exact_raw(cap) == 1000000000000000000000000000060
+
+
+def test_every_one_of_the_thirty_decimal_places_survives():
+    cap = "1.000000000000000000000000000001"          # the 30th place is one raw
+    assert xno_to_raw(cap) == 10**30 + 1
+
+
+def test_a_cap_too_long_to_convert_exactly_is_refused():
+    with pytest.raises(ValueError, match="too many digits to convert to raw exactly"):
+        xno_to_raw("1." + "0" * 59 + "1")
+
+
+def test_the_corrected_cap_reaches_the_retriever_that_reads_it():
+    """The cap is read once, at construction, so the exactness has to land on `max_raw`."""
+    session, payer = FakeSession(challenge()), RecordingPayer()
+    retriever = PayPerCallSearch("x402", payer=payer, session=session,
+                                 max_xno="99.99999999999999999999999999999")
+    assert retriever.max_raw == 99999999999999999999999999999990
+    assert payer.offers == []
+
+
+def test_a_cap_that_cannot_be_converted_is_refused_at_construction():
+    """Not reachable by rounding any more: too many digits is its own named refusal."""
+    session, payer = FakeSession(challenge()), RecordingPayer()
+    with pytest.raises(ValueError, match="too many digits to convert to raw exactly"):
+        PayPerCallSearch("x402", payer=payer, session=session,
+                         max_xno="1." + "0" * 59 + "1")
+    assert payer.offers == []
+    assert session.calls == []
+
+
+def test_a_price_one_raw_over_an_exact_cap_is_still_refused():
+    """The cap is exact, so the comparison at its boundary is exact too."""
+    cap_xno = "0.000100000000000000000000000001"      # the Vend price plus one raw
+    assert xno_to_raw(cap_xno) == PRICE_RAW + 1
+    session, payer = FakeSession(challenge()), RecordingPayer()
+    paid = PayPerCallSearch("x402", payer=payer, session=session, max_xno=cap_xno)
+    assert paid.max_raw == PRICE_RAW + 1
+
+
+# Controls: every cap that already converted exactly must be unchanged, so the refusal cannot
+# quietly cost an operator a working configuration.
+
+
+@pytest.mark.parametrize("cap", ["0.001", "0.0001", "0", "1", "100", "0.000000000000000000000000000001"])
+def test_a_cap_that_already_converted_exactly_is_unchanged(cap):
+    assert xno_to_raw(cap) == exact_raw(cap)
+
+
+def test_the_default_cap_still_pays_the_live_vend_price():
+    session, payer = FakeSession(challenge(), ok()), RecordingPayer()
+    assert PayPerCallSearch("x402", payer=payer, session=session).search() != []
+    assert [o.amount_raw for o in payer.offers] == [PRICE_RAW]
+
+
+def test_a_negative_cap_is_still_refused():
+    with pytest.raises(ValueError, match="not a non-negative XNO amount"):
+        xno_to_raw("-1")
+
+
+def test_a_sub_raw_cap_is_still_refused_not_rounded_to_one_raw():
+    with pytest.raises(ValueError, match="more precision than 1 raw"):
+        xno_to_raw("0.0000000000000000000000000000001")   # 31 places: a fraction of a raw
+
+
+def test_the_decimal_context_does_not_leak_out_of_the_conversion():
+    import decimal
+
+    before_prec = decimal.getcontext().prec
+    before_traps = dict(decimal.getcontext().traps)
+    xno_to_raw("0.0001")
+    assert decimal.getcontext().prec == before_prec
+    assert dict(decimal.getcontext().traps) == before_traps

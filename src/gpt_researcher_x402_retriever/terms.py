@@ -13,10 +13,16 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, Inexact, localcontext
 from typing import Any, Mapping, Optional
 
 RAW_PER_XNO = 10**30
+#: Digits for the XNO -> raw conversion, in a context of its own. A price carries up to 30
+#: decimal places and a raw amount reaches 39 digits; `decimal`'s process-global default is 28,
+#: which is fewer than either. 60 covers both with room, and `Inexact` is trapped rather than
+#: rounded, because a value rounded at the 28th significant digit is still an INTEGER and so
+#: `to_integral_value()` could not see that anything had been lost.
+CONVERSION_PREC = 60
 NANO_ADDRESS = re.compile(r"^(nano|xrb)_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$")
 BLOCK_HASH = re.compile(r"^[0-9A-Fa-f]{64}$")
 #: An amount in raw is ASCII decimal digits. ``str.isdigit()`` is not that test: it is also true
@@ -67,16 +73,60 @@ class PaymentOffer:
 
 
 def xno_to_raw(value: Any) -> int:
-    """Exact decimal XNO -> raw. Floats are read through ``str`` so ``0.0001`` means 0.0001."""
+    """Exact decimal XNO -> raw. Floats are read through ``str`` so ``0.0001`` means 0.0001.
+
+    The multiplication runs in its own 60-digit context with ``Inexact`` trapped, and not in the
+    process-global one. ``decimal.getcontext().prec`` defaults to **28** significant digits; an XNO
+    amount carries up to **30** decimal places and a raw amount reaches **39** digits, so the
+    multiplication rounded -- and the ``to_integral_value()`` test below could not catch it, because
+    *a value rounded at the 28th significant digit is still an integer*.
+
+    This function's one caller is ``PayPerCallSearch.max_raw``, the ceiling a price is refused
+    above, so a rounded answer was a ceiling nobody set. Both caps below are 29 decimal places --
+    a legal whole number of raw, which the conversion owes back unchanged. Measured on the shipped
+    code:
+
+    ===================================  ====================================  ==============
+    ``X402_MAX_XNO``                     the cap it produced                   against the ask
+    ===================================  ====================================  ==============
+    ``99.99999999999999999999999999999`` ``100000000000000000000000000000000``  **+10 raw**
+    ``1.00000000000000000000000000006``  ``1000000000000000000000000000000``    **-60 raw**
+    ===================================  ====================================  ==============
+
+    The first is the one that costs something: the ceiling came back *above* what was configured,
+    so a price up to 10 raw over it was paid, and no refusal fired because the rounded value was
+    still an integer. The second refuses a price the operator meant to allow.
+
+    Both now convert exactly. A cap too long to convert even at 60 digits gets its own named
+    refusal rather than being rounded into a number nobody chose, and a sub-raw cap keeps the
+    ``to_integral_value()`` refusal below. ``localcontext`` restores the caller's precision and
+    traps, so importing this library does not change arithmetic in the program that imported it.
+
+    Note for a reviewer: this is **not** a refusal-only change. The ``+10 raw`` case narrows the
+    cap, but the ``-60 raw`` case widens it -- a price between ``10**30`` and ``10**30 + 60`` raw
+    is paid under a cap of ``1.00000000000000000000000000006`` where it was refused before. It is
+    the correct number either way, and it is the number the operator asked for, but it moves an
+    amount on the spend path and so is not a routine's to merge.
+    """
     try:
         amount = Decimal(str(value).strip())
     except Exception as exc:  # decimal.InvalidOperation and friends
         raise ValueError(f"not a decimal XNO amount: {value!r}") from exc
     if not amount.is_finite() or amount < 0:
         raise ValueError(f"not a non-negative XNO amount: {value!r}")
-    raw = amount * RAW_PER_XNO
-    if raw != raw.to_integral_value():
-        raise ValueError(f"more precision than 1 raw: {value!r}")
+    with localcontext() as context:
+        context.prec = CONVERSION_PREC
+        context.traps[Inexact] = True
+        try:
+            raw = amount * RAW_PER_XNO
+        except Inexact:
+            raise ValueError(
+                f"too many digits to convert to raw exactly: {value!r}"
+            ) from None
+        # `to_integral_value` signals neither Inexact nor Rounded, so the trap above does not
+        # stand in for this test: a sub-raw amount still gets its own named refusal.
+        if raw != raw.to_integral_value():
+            raise ValueError(f"more precision than 1 raw: {value!r}")
     return int(raw)
 
 
