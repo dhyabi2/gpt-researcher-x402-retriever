@@ -1,5 +1,6 @@
 import base64
 import json
+from decimal import Context, localcontext
 
 import pytest
 
@@ -347,6 +348,22 @@ def test_the_https_guard_still_refuses_a_plainly_http_endpoint():
 # is `PayPerCallSearch.max_raw`, the ceiling a price is refused above, so a rounded answer was a
 # ceiling nobody set -- and `to_integral_value()` could not catch the rounding, because a value
 # rounded at the 28th significant digit is still an integer.
+#
+# Every law below runs under `decimal_default_context`, a fresh `Context()` (prec 28, the
+# library default). Without it these laws only pass or fail by accident of import order:
+# `nanopy` -- imported by the optional `feeless402` payer -- sets the PROCESS-GLOBAL `prec` to 40
+# at import, and 40 digits happen to be enough, so in a full suite with `feeless402` installed
+# the old code passed them too. Pinning the context makes them measure this module, not that one.
+
+
+@pytest.fixture
+def decimal_default_context():
+    with localcontext(Context()) as context:
+        assert context.prec == 28
+        yield context
+
+
+under_default_precision = pytest.mark.usefixtures("decimal_default_context")
 
 
 def exact_raw(decimal_xno: str) -> int:
@@ -356,6 +373,7 @@ def exact_raw(decimal_xno: str) -> int:
     return int(whole or 0) * 10**30 + int(frac.ljust(30, "0") or 0)
 
 
+@under_default_precision
 def test_a_cap_is_not_rounded_up_above_what_was_configured():
     """The direction that costs something: the cap came back 10 raw ABOVE the ask.
 
@@ -370,21 +388,25 @@ def test_a_cap_is_not_rounded_up_above_what_was_configured():
     assert xno_to_raw(cap) < 10**32
 
 
+@under_default_precision
 def test_a_cap_at_full_raw_precision_converts_exactly_and_not_sixty_raw_short():
     cap = "1.00000000000000000000000000006"           # 29 decimal places, a whole number of raw
     assert xno_to_raw(cap) == exact_raw(cap) == 1000000000000000000000000000060
 
 
+@under_default_precision
 def test_every_one_of_the_thirty_decimal_places_survives():
     cap = "1.000000000000000000000000000001"          # the 30th place is one raw
     assert xno_to_raw(cap) == 10**30 + 1
 
 
+@under_default_precision
 def test_a_cap_too_long_to_convert_exactly_is_refused():
     with pytest.raises(ValueError, match="too many digits to convert to raw exactly"):
         xno_to_raw("1." + "0" * 59 + "1")
 
 
+@under_default_precision
 def test_the_corrected_cap_reaches_the_retriever_that_reads_it():
     """The cap is read once, at construction, so the exactness has to land on `max_raw`."""
     session, payer = FakeSession(challenge()), RecordingPayer()
@@ -394,6 +416,7 @@ def test_the_corrected_cap_reaches_the_retriever_that_reads_it():
     assert payer.offers == []
 
 
+@under_default_precision
 def test_a_cap_that_cannot_be_converted_is_refused_at_construction():
     """Not reachable by rounding any more: too many digits is its own named refusal."""
     session, payer = FakeSession(challenge()), RecordingPayer()
@@ -404,40 +427,68 @@ def test_a_cap_that_cannot_be_converted_is_refused_at_construction():
     assert session.calls == []
 
 
+def priced_challenge(amount_raw: int):
+    body = fixture("web_search_402.json")
+    body["accepts"][0]["amount"] = str(amount_raw)
+    return FakeResponse(402, body)
+
+
+@under_default_precision
 def test_a_price_one_raw_over_an_exact_cap_is_still_refused():
-    """The cap is exact, so the comparison at its boundary is exact too."""
-    cap_xno = "0.000100000000000000000000000001"      # the Vend price plus one raw
-    assert xno_to_raw(cap_xno) == PRICE_RAW + 1
-    session, payer = FakeSession(challenge()), RecordingPayer()
-    paid = PayPerCallSearch("x402", payer=payer, session=session, max_xno=cap_xno)
-    assert paid.max_raw == PRICE_RAW + 1
+    """The cap is exact, so the comparison at its boundary is exact too.
+
+    The old code turned this cap into exactly 100 XNO, so a price one raw over the configured
+    ceiling (and up to ten) was paid. It must be refused before the payer is asked.
+    """
+    cap_xno = "99.99999999999999999999999999999"     # 29 places: a whole number of raw
+    cap_raw = 99999999999999999999999999999990
+    session, payer = FakeSession(priced_challenge(cap_raw + 1)), RecordingPayer()
+    search = PayPerCallSearch("x402", payer=payer, session=session, max_xno=cap_xno)
+    assert search.search() == []
+    assert payer.offers == []
+    assert len(session.calls) == 1
+
+
+@under_default_precision
+def test_a_price_exactly_at_an_exact_cap_is_still_paid():
+    """The other side of the same boundary: the cap itself is allowed."""
+    cap_xno = "99.99999999999999999999999999999"
+    cap_raw = 99999999999999999999999999999990
+    session, payer = FakeSession(priced_challenge(cap_raw), ok()), RecordingPayer()
+    assert PayPerCallSearch("x402", payer=payer, session=session, max_xno=cap_xno).search() != []
+    assert [o.amount_raw for o in payer.offers] == [cap_raw]
 
 
 # Controls: every cap that already converted exactly must be unchanged, so the refusal cannot
 # quietly cost an operator a working configuration.
 
 
+@under_default_precision
 @pytest.mark.parametrize("cap", ["0.001", "0.0001", "0", "1", "100", "0.000000000000000000000000000001"])
 def test_a_cap_that_already_converted_exactly_is_unchanged(cap):
     assert xno_to_raw(cap) == exact_raw(cap)
 
 
+@under_default_precision
 def test_the_default_cap_still_pays_the_live_vend_price():
     session, payer = FakeSession(challenge(), ok()), RecordingPayer()
     assert PayPerCallSearch("x402", payer=payer, session=session).search() != []
     assert [o.amount_raw for o in payer.offers] == [PRICE_RAW]
 
 
+@under_default_precision
 def test_a_negative_cap_is_still_refused():
     with pytest.raises(ValueError, match="not a non-negative XNO amount"):
         xno_to_raw("-1")
 
 
+@under_default_precision
 def test_a_sub_raw_cap_is_still_refused_not_rounded_to_one_raw():
     with pytest.raises(ValueError, match="more precision than 1 raw"):
         xno_to_raw("0.0000000000000000000000000000001")   # 31 places: a fraction of a raw
 
 
+@under_default_precision
 def test_the_decimal_context_does_not_leak_out_of_the_conversion():
     import decimal
 

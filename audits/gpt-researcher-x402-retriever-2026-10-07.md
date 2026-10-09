@@ -8,7 +8,7 @@ HEAD audited: `origin/main` at the time of the branch (see the pull request). Py
 ## Checked
 
 - **Install and suite, as CI runs them.** `pip install -e ".[test]"`, `pip install -e
-  ".[feeless402]"`, `pytest -q`: **56 passed, 2 skipped** on `main`; **73 passed, 2 skipped** after
+  ".[feeless402]"`, `pytest -q`: **56 passed, 2 skipped** on `main`; **74 passed, 2 skipped** after
   this branch. The two skips are the ones CI also skips - GPT Researcher is not installed and
   `X402_LIVE` is unset - and both are deliberate, with their reasons printed.
   *Environment note, not a repository defect:* in this container `pip` is Python 3.13's while
@@ -76,7 +76,13 @@ own named refusal instead of being rounded into a number nobody chose, a sub-raw
 `to_integral_value()` refusal, and `localcontext` restores the caller's precision and traps so
 importing this library does not change arithmetic in the importing program.
 
-Fifteen tests added. Six fail with `terms.py` alone reverted to `main`:
+Thirteen test functions added (18 collected items: one is parametrized over six caps). Every one
+runs inside a fresh `localcontext(Context())`, i.e. at the library default of 28 digits. That
+fixture is load-bearing: `nanopy`, imported by the optional `feeless402` payer that CI installs,
+sets the process-global `prec` to 40 at import, and 40 digits are enough - so without the fixture,
+the full suite with `terms.py` reverted to `main` fails only **2** of these (the two "too many
+digits" refusals), and the rounding cases pass on the buggy code. With the fixture, **7** fail
+with `terms.py` alone reverted to `main`, in the full suite and in `tests/test_retriever.py` alone:
 
 ```
 test_a_cap_is_not_rounded_up_above_what_was_configured
@@ -85,13 +91,18 @@ test_every_one_of_the_thirty_decimal_places_survives
 test_a_cap_too_long_to_convert_exactly_is_refused
 test_the_corrected_cap_reaches_the_retriever_that_reads_it
 test_a_cap_that_cannot_be_converted_is_refused_at_construction
+test_a_price_one_raw_over_an_exact_cap_is_still_refused
 ```
 
-The other nine are controls that must hold either way, so the change cannot quietly cost a working
-configuration: every cap that already converted exactly is unchanged (including `0.001`, the
-default, and one raw), the default cap still pays the live Vend price of `10**26` raw, a negative
-cap is still refused, a sub-raw cap is still refused rather than rounded up to one raw, and the
-Decimal context does not leak out of the conversion.
+The last one is the cost stated end to end: with a cap of `99.99999999999999999999999999999` the
+old code paid a price one raw over it; the fixed code refuses it before the payer is asked.
+
+The other six functions (eleven items) are controls that must hold either way, so the change
+cannot quietly cost a working configuration: a price exactly at the cap is still paid, every cap
+that already converted exactly is unchanged (six caps, including `0.001`, the default, and one
+raw), the default cap still pays the live Vend price of `10**26` raw, a negative cap is still
+refused, a sub-raw cap is still refused rather than rounded up to one raw, and the Decimal context
+does not leak out of the conversion.
 
 **Not merged by this run, and it is not a close call.** The `+10 raw` case narrows the cap, but the
 `-60 raw` case **widens** it: a price between `10**30` and `10**30 + 60` raw is paid under a cap of
