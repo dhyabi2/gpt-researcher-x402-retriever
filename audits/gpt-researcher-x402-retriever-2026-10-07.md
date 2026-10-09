@@ -104,6 +104,26 @@ raw), the default cap still pays the live Vend price of `10**26` raw, a negative
 refused, a sub-raw cap is still refused rather than rounded up to one raw, and the Decimal context
 does not leak out of the conversion.
 
+**The same `nanopy` fact narrows how far this defect reaches in production, and it was not
+written down above.** `prec` 40 exceeds raw's 39 digits, so in any process that imports `nanopy`
+the unfixed conversion is already exact. Measured on `main`'s `terms.py`, driving the two caps
+directly:
+
+| process | `99.999...999` (29 places) | `1.000...006` (29 places) |
+| --- | --- | --- |
+| no payer, or a payer that is not feeless402 (`prec` 28) | **+10 raw** | **-60 raw** |
+| the `Feeless402Payer` the README recommends (`nanopy` -> `prec` 40) | exact | exact |
+
+So the wrong cap is reached by an agent using the documented `nano-wallet-xno` payer, a payer of
+its own, or none at all - `max_raw` is computed at construction whether or not anything ever pays -
+and **not** by one on the recommended feeless402 path. That is a smaller blast radius than the
+finding above implies on its own, and it is the honest version for deciding whether to merge.
+
+It also sharpens the argument *for* the fix rather than against it: as it stands, whether this
+money path computes the operator's ceiling correctly depends on whether an unrelated dependency
+happened to raise the process-global precision at import. `localcontext` is what makes the answer
+the same either way. A reviewer should weigh that, not the raw count of affected configurations.
+
 **Not merged by this run, and it is not a close call.** The `+10 raw` case narrows the cap, but the
 `-60 raw` case **widens** it: a price between `10**30` and `10**30 + 60` raw is paid under a cap of
 `1.00000000000000000000000000006` where it was refused before. That is past the Authority
