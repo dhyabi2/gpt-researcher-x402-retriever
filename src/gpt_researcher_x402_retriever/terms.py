@@ -23,11 +23,18 @@ RAW_PER_XNO = 10**30
 #: rounded, because a value rounded at the 28th significant digit is still an INTEGER and so
 #: `to_integral_value()` could not see that anything had been lost.
 CONVERSION_PREC = 60
-NANO_ADDRESS = re.compile(r"^(nano|xrb)_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$")
-BLOCK_HASH = re.compile(r"^[0-9A-Fa-f]{64}$")
+#: Every pattern here ends in ``\Z``, not ``$``. In ``re``, ``$`` also matches **before a single
+#: trailing newline**, so ``^...$`` is not the exact match each of these needs: ``"nano_...\n"``
+#: matched ``NANO_ADDRESS``, and the loop in ``valid_nano_address`` then raised ``KeyError('\n')``
+#: out of a function documented to return a bool, and out of ``parse_challenge``, whose documented
+#: failure is ``TermsError``. ``"<64 hex>\n"`` matched ``BLOCK_HASH`` and was put straight into the
+#: ``X-PAYMENT`` header, where ``requests`` raises ``InvalidHeader`` - after the XNO had been sent,
+#: with a message that never says a payment was made.
+NANO_ADDRESS = re.compile(r"^(nano|xrb)_[13][13456789abcdefghijkmnopqrstuwxyz]{59}\Z")
+BLOCK_HASH = re.compile(r"^[0-9A-Fa-f]{64}\Z")
 #: An amount in raw is ASCII decimal digits. ``str.isdigit()`` is not that test: it is also true
 #: for "\u00b2", which ``int()`` then refuses, and for "\u0663", which is not what a seller wrote.
-RAW_AMOUNT = re.compile(r"^[0-9]+$")
+RAW_AMOUNT = re.compile(r"^[0-9]+\Z")
 _B32 = {c: i for i, c in enumerate("13456789abcdefghijkmnopqrstuwxyz")}
 
 

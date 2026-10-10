@@ -1,12 +1,21 @@
 import base64
 import json
+import logging
 from decimal import Context, localcontext
 
 import pytest
 
 from gpt_researcher_x402_retriever import PayPerCallSearch, set_default_payer
 from gpt_researcher_x402_retriever.retriever import DEFAULT_ENDPOINT
-from gpt_researcher_x402_retriever.terms import NANO_ADDRESS, TermsError, parse_challenge, xno_to_raw
+from gpt_researcher_x402_retriever.terms import (
+    BLOCK_HASH,
+    NANO_ADDRESS,
+    RAW_AMOUNT,
+    TermsError,
+    parse_challenge,
+    valid_nano_address,
+    xno_to_raw,
+)
 
 from conftest import FakeResponse, FakeSession, RecordingPayer, fixture
 
@@ -195,7 +204,7 @@ def test_offers_on_other_rails_are_not_payable(mutate):
         parse_challenge(body, None, DEFAULT_ENDPOINT)
 
 
-@pytest.mark.parametrize("amount", ["0", "-1", "1e26", 1e26, "0.0001", "", "\u00b2", "\u0663"])
+@pytest.mark.parametrize("amount", ["0", "-1", "1e26", 1e26, "0.0001", "", "\u00b2", "\u0663", "100\n"])
 def test_amount_must_be_a_positive_integer_raw_string(amount):
     """The last two are `str.isdigit()` but not raw.
 
@@ -497,3 +506,63 @@ def test_the_decimal_context_does_not_leak_out_of_the_conversion():
     xno_to_raw("0.0001")
     assert decimal.getcontext().prec == before_prec
     assert dict(decimal.getcontext().traps) == before_traps
+
+
+# -- a trailing newline is not part of an address, a hash or an amount -------------------------
+#
+# `re`'s `$` matches before a single trailing newline, so `NANO_ADDRESS.match`, `BLOCK_HASH.match`
+# and `RAW_AMOUNT.match` all accepted one. Each pattern now ends in `\Z`.
+
+
+def test_a_pay_to_with_a_trailing_newline_is_refused_and_does_not_raise_keyerror():
+    """`valid_nano_address` is documented to return a bool, and it raised `KeyError('\n')`.
+
+    `"nano_...\n"` matched `^...$`, so `valid_nano_address` ran its base32 loop over the newline
+    and `_B32['\n']` raised - out of a function every caller uses as a guard, and out of
+    `parse_challenge`, whose documented failure is `TermsError`. A seller whose 402 carries a
+    newline-terminated `payTo` (a template, a hand-edited JSON) got a `KeyError` in place of the
+    named refusal.
+    """
+    assert valid_nano_address(VEND_PAY_TO + "\n") is False
+
+    body = fixture("web_search_402.json")
+    body["accepts"][0]["payTo"] = VEND_PAY_TO + "\n"
+    with pytest.raises(TermsError):
+        parse_challenge(body, None, DEFAULT_ENDPOINT)
+
+    session, payer = FakeSession(FakeResponse(402, body), ok()), RecordingPayer("b" * 64)
+    assert PayPerCallSearch("x402", payer=payer, session=session).search() == []
+    assert payer.offers == []
+
+
+class HeaderCheckingSession(FakeSession):
+    """A `FakeSession` that refuses an illegal header value, as `requests` does.
+
+    `requests.PreparedRequest` raises `InvalidHeader` on a value containing a return character, so
+    a hash with a trailing newline cannot reach the wire. It reaches that check only *after*
+    `payer.pay` has sent the XNO, and `InvalidHeader`'s message does not say a payment was made.
+    """
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        for name, value in (headers or {}).items():
+            if isinstance(value, str) and ("\n" in value or "\r" in value):
+                raise ValueError(f"return character(s) in header value: {name}")
+        return super().get(url, params=params, headers=headers, timeout=timeout)
+
+
+def test_a_block_hash_with_a_trailing_newline_is_refused_before_it_reaches_a_header(caplog):
+    session = HeaderCheckingSession(challenge(), ok())
+    retriever = PayPerCallSearch("x402", payer=RecordingPayer("b" * 64 + "\n"), session=session)
+
+    with caplog.at_level(logging.WARNING):
+        assert retriever.search() == []
+    assert len(session.calls) == 1              # the paid retry is never attempted
+    # The refusal is this package's own, naming what was wrong. Before, the hash went into
+    # `X-PAYMENT` and the only thing the operator saw was `requests` complaining about a header.
+    assert "payer did not return a 64-hex Nano block hash" in caplog.text
+
+
+def test_the_three_patterns_do_not_end_at_a_newline():
+    assert not NANO_ADDRESS.match(VEND_PAY_TO + "\n")
+    assert not BLOCK_HASH.match("a" * 64 + "\n")
+    assert not RAW_AMOUNT.match("100\n")
