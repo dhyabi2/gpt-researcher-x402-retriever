@@ -34,7 +34,7 @@ an agent pay in XNO with this, today, without being hurt?
 ## Found and fixed
 
 **`$` is not the end of the string, and three money-path patterns used it** —
-`src/gpt_researcher_x402_retriever/terms.py:26-30`. In `re`, `$` also matches immediately before a
+`src/gpt_researcher_x402_retriever/terms.py:33-37`. In `re`, `$` also matches immediately before a
 single trailing newline, so each of `NANO_ADDRESS`, `BLOCK_HASH` and `RAW_AMOUNT` accepted one.
 
 - `payTo = "nano_...\n"` matched `NANO_ADDRESS`, so `valid_nano_address` (terms.py:42-51) went on to
@@ -58,12 +58,10 @@ amount, destination, rounding or key path changes. Four tests fail on `1c39484` 
 
 ## Found, not fixed (not this pull request's concern)
 
-- **A malformed hash from a payer leaves no record of a payment that may have been made.**
-  `retriever.py:127` raises `"payer did not return a 64-hex Nano block hash"` without the value, and
-  `self.last_payment` is only set after the check — so if a payer sends the XNO and then returns
-  something unparseable, nothing anywhere holds the hash for a refund claim. Putting `{block_hash!r}`
-  in the message would keep the trail (a send hash is public ledger data, not a secret), but that is
-  a change to the error path rather than to the newline refusal, so it is left for its own change.
+- **A malformed hash from a payer left no record of a payment that may have been made** — now
+  fixed in this pull request. The refusal (`retriever.py:129-134`) keeps what the payer returned on
+  `last_payment_unverified` (never on `last_payment`, never in a header, never retried) and its
+  message says the XNO may already have been sent.
 - `maxTimeoutSeconds: true` becomes `1`, because `isinstance(True, int)` is true
   (`terms.py:167`). It is not an amount and not a destination; noted only.
 

@@ -72,6 +72,8 @@ assignment where the instance is built. There is no environment-only setup today
 5. **With a payer**, the payer sends exactly that amount and returns the block hash. The retriever
    then retries once with `X-PAYMENT: <block hash>`. If the paid retry isn't served, it never pays
    again for that call. The hash stays on `retriever.last_payment` so you can take it up with the seller.
+   If the payer returns something that is not a block hash, nothing is retried and what it
+   returned stays on `retriever.last_payment_unverified`, since the XNO may already have been sent.
 
 Results are `[{"href", "body", "title"}]`: links and snippets. The retriever declares
 `requires_scraping = True`, so GPT Researcher fetches each page itself and keeps a real citation.

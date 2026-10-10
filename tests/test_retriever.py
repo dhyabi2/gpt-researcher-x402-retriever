@@ -559,7 +559,24 @@ def test_a_block_hash_with_a_trailing_newline_is_refused_before_it_reaches_a_hea
     assert len(session.calls) == 1              # the paid retry is never attempted
     # The refusal is this package's own, naming what was wrong. Before, the hash went into
     # `X-PAYMENT` and the only thing the operator saw was `requests` complaining about a header.
-    assert "payer did not return a 64-hex Nano block hash" in caplog.text
+    assert "not a 64-hex Nano block hash" in caplog.text
+
+
+def test_a_malformed_block_hash_is_kept_because_the_xno_may_already_have_been_sent(caplog):
+    returned = "b" * 64 + "\n"
+    session = HeaderCheckingSession(challenge(), ok())
+    payer = RecordingPayer(returned)
+    retriever = PayPerCallSearch("x402", payer=payer, session=session)
+
+    with caplog.at_level(logging.WARNING):
+        assert retriever.search() == []
+    assert len(session.calls) == 1              # no paid retry
+    assert len(payer.offers) == 1               # and never paid twice
+    assert retriever.last_payment is None       # not a hash, so not recorded as one
+    # Before, the value was dropped: the only handle for a refund claim was lost.
+    assert retriever.last_payment_unverified == returned
+    assert "the XNO may already have been sent" in caplog.text
+    assert repr(returned) in caplog.text
 
 
 def test_the_three_patterns_do_not_end_at_a_newline():

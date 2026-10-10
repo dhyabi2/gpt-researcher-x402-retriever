@@ -80,6 +80,9 @@ class PayPerCallSearch(_Base):
         self.last_offer: Optional[PaymentOffer] = None
         #: The block hash this instance paid with, if it paid.
         self.last_payment: Optional[str] = None
+        #: What a payer returned when it was not a block hash. The XNO may already have been sent,
+        #: so it is kept for a refund claim; it is never sent in a header.
+        self.last_payment_unverified: Optional[str] = None
 
     # -- contract ---------------------------------------------------------
 
@@ -124,7 +127,11 @@ class PayPerCallSearch(_Base):
 
         block_hash = payer.pay(offer)
         if not isinstance(block_hash, str) or not BLOCK_HASH.match(block_hash):
-            raise RuntimeError("payer did not return a 64-hex Nano block hash")
+            self.last_payment_unverified = block_hash if isinstance(block_hash, str) else repr(block_hash)
+            raise RuntimeError(
+                f"payer returned {block_hash!r}, not a 64-hex Nano block hash; the XNO may already have "
+                "been sent - kept on last_payment_unverified for a refund claim"
+            )
         self.last_payment = block_hash
         paid = self._get({"X-PAYMENT": self.last_payment})
         if paid.status_code != 200:
