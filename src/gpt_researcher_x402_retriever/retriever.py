@@ -113,7 +113,11 @@ class PayPerCallSearch(_Base):
 
         offer = parse_challenge(_json_or_none(response), response.headers.get("payment-required"), self.endpoint)
         self.last_offer = offer
-        self._check_offer(offer, getattr(response, "url", None))
+        self._check_offer(
+            offer,
+            getattr(response, "url", None),
+            [h.url for h in (getattr(response, "history", None) or []) if isinstance(getattr(h, "url", None), str)],
+        )
         payer = resolve_payer(self._payer)
         if payer is None:
             logger.info(
@@ -135,7 +139,12 @@ class PayPerCallSearch(_Base):
             )
         return paid.json()
 
-    def _check_offer(self, offer: PaymentOffer, challenge_url: Optional[str] = None) -> None:
+    def _check_offer(
+        self,
+        offer: PaymentOffer,
+        challenge_url: Optional[str] = None,
+        redirect_urls: Optional[List[str]] = None,
+    ) -> None:
         if offer.amount_raw > self.max_raw:
             raise TermsError(f"price {offer.amount_xno} XNO is above X402_MAX_XNO")
         if self.pay_to is not None and offer.pay_to != self.pay_to:
@@ -162,6 +171,29 @@ class PayPerCallSearch(_Base):
                 f"the 402 was served over {urlparse(challenge_url).scheme or 'no'} scheme "
                 f"({challenge_url}) -- refusing to pay an address that did not arrive over HTTPS"
             )
+        # And every hop on the way, not just where it ended up. `response.url` is the
+        # FINAL url only; the hops a redirect passed THROUGH live solely in
+        # `response.history`, so a chain `https -> http -> https` leaves `.url` on
+        # https and both checks above pass -- while whoever is on the path at the
+        # plain-http hop chose the origin that then served the 402 and its `payTo`.
+        # Measured 2026-10-12 against a local TLS -> plain-HTTP -> TLS chain, through
+        # this class with a real `requests.Session`:
+        #
+        #     endpoint seen by guard : https://localhost:40955/api/v1/web-search
+        #     challenge_url seen     : https://localhost:33313/api/v1/web-search
+        #     PAID?                  : True
+        #     amount_raw             : 100000000000000000000000000
+        #     pay_to                 : nano_1yo6c1t64ahfjdw1dxizmbb...
+        #
+        # 0.0001 XNO, irreversibly, to an address chosen at the plain-http hop. That
+        # is the harm the check above was added for, reached by a chain instead of a
+        # single downgrade. A chain that stays on HTTPS throughout is still paid.
+        for hop in redirect_urls or []:
+            if urlparse(hop).scheme != "https":
+                raise TermsError(
+                    f"the 402 was reached through a {urlparse(hop).scheme or 'schemeless'} redirect "
+                    f"({hop}) -- refusing to pay an address chosen on a hop anyone on the path could rewrite"
+                )
 
 
 def register() -> bool:
