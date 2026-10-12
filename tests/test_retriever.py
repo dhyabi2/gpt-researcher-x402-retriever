@@ -339,6 +339,57 @@ def test_a_402_from_another_https_origin_is_still_paid_and_the_reason_is_recorde
     assert [o.amount_raw for o in payer.offers] == [PRICE_RAW]
 
 
+def test_a_402_reached_through_a_plain_http_hop_is_not_paid():
+    """The guard above reads where the answer ENDED UP. `requests` puts only the final
+    url in `response.url`; the hops it passed THROUGH live solely in `response.history`.
+
+    So `https -> http -> https` satisfies both checks above, while the plain-http hop is
+    where whoever is on the path chose the origin that then served the 402 and its
+    `payTo`. Measured 2026-10-12 against a real local TLS -> plain-HTTP -> TLS chain,
+    driven through this class with a real `requests.Session`:
+
+        endpoint seen by guard : https://localhost:40955/api/v1/web-search
+        challenge_url seen     : https://localhost:42013/api/v1/web-search
+        PAID?                  : True
+        amount_raw             : 100000000000000000000000000
+        pay_to                 : nano_1yo6c1t64ahfjdw1dxizmbb...
+
+    0.0001 XNO, irreversibly, to an address chosen at the plain-http hop -- the same
+    harm the 10-04 guard exists to prevent, reached by a chain instead of one downgrade.
+    """
+    body = fixture("web_search_402.json")
+    through_http = FakeResponse(
+        402, body,
+        url="https://attacker.example/api/v1/web-search",
+        history=["https://search.paypercall.dev/api/v1/web-search",
+                 "http://hop.example/api/v1/web-search"],
+    )
+    session, payer = FakeSession(through_http), RecordingPayer()
+    search = PayPerCallSearch("q", payer=payer, session=session)
+    assert search.search() == []
+    assert payer.offers == [], "nothing may be sent for a 402 reached through a plain-HTTP hop"
+    assert search.last_payment is None
+    # No paid retry: the refusal happens before the payer is ever asked.
+    assert len(session.calls) == 1
+
+
+def test_a_redirect_chain_that_stays_on_https_is_still_paid():
+    # The control for the hop check, matching the existing single-redirect control:
+    # every hop holds a certificate for its own name, so a seller moving through its
+    # own HTTPS hosts is still paid. Only a plain-HTTP hop is refused.
+    body = fixture("web_search_402.json")
+    moved = FakeResponse(
+        402, body,
+        url="https://cdn.paypercall.dev/api/v1/web-search",
+        history=["https://search.paypercall.dev/api/v1/web-search",
+                 "https://edge.paypercall.dev/api/v1/web-search"],
+    )
+    session, payer = FakeSession(moved, ok()), RecordingPayer("d" * 64)
+    search = PayPerCallSearch("q", payer=payer, session=session)
+    assert len(search.search()) > 0
+    assert [o.amount_raw for o in payer.offers] == [PRICE_RAW]
+
+
 def test_the_https_guard_still_refuses_a_plainly_http_endpoint():
     # The pre-existing half of the guard, which must keep holding: a response with
     # no `url` at all (anything that is not a `requests.Response`) falls back to the
