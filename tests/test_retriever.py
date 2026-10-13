@@ -735,3 +735,138 @@ def test_a_paid_retry_redirected_within_https_is_still_followed_and_served():
     session.get = staged
     assert len(search.search()) > 0, "an HTTPS-only redirect on the paid retry must still be served"
     assert [s["url"] for s in session.sent if "X-PAYMENT" in s["headers"]] == [ENDPOINT, HTTPS_HOP]
+
+
+# --- sessions the paid retry has to work with ---------------------------------
+
+
+class MainStyleSession(FakeSession):
+    """A user-injected session written against the original contract: no ``allow_redirects``."""
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        return super().get(url, params=params, headers=headers, timeout=timeout)
+
+
+def test_a_session_without_allow_redirects_still_gets_free_results():
+    session = MainStyleSession(ok())
+    results = PayPerCallSearch("q", payer=RecordingPayer(), session=session).search(max_results=3)
+    assert len(results) == 3
+    assert len(session.calls) == 1
+
+
+def test_a_session_without_allow_redirects_is_never_paid_with(caplog):
+    # Whether its get() follows redirects is not knowable, so the paid retry could not be
+    # kept off a plain-HTTP hop: refuse BEFORE the XNO moves, not after.
+    session, payer = MainStyleSession(challenge()), RecordingPayer()
+    search = PayPerCallSearch("q", payer=payer, session=session)
+    with caplog.at_level(logging.WARNING):
+        assert search.search() == []
+    assert payer.offers == [], "no XNO may be sent when the paid retry cannot be made safely"
+    assert search.last_payment is None
+    assert len(session.calls) == 1
+    assert "allow_redirects" in caplog.text
+
+
+def test_a_session_with_kwargs_get_is_paid_with():
+    class KwargsSession(FakeSession):
+        kwargs_seen = []
+
+        def get(self, url, **kwargs):
+            self.kwargs_seen.append(dict(kwargs))
+            return super().get(url, **kwargs)
+
+    session, payer = KwargsSession(challenge(), ok()), RecordingPayer()
+    assert len(PayPerCallSearch("q", payer=payer, session=session).search()) > 0
+    assert len(payer.offers) == 1
+    assert "allow_redirects" not in session.kwargs_seen[0], "the unpaid request is sent as it always was"
+    assert session.kwargs_seen[1]["allow_redirects"] is False
+
+
+import requests as _requests  # noqa: E402
+from requests.adapters import BaseAdapter  # noqa: E402
+from requests.structures import CaseInsensitiveDict  # noqa: E402
+
+
+class _RouteAdapter(BaseAdapter):
+    """A transport for a real ``requests.Session``: answers from a script, records what was sent."""
+
+    def __init__(self, script):
+        super().__init__()
+        self.script = list(script)
+        self.sent = []
+
+    def send(self, request, **kwargs):
+        self.sent.append(request)
+        status, body, headers = self.script.pop(0)
+        r = _requests.Response()
+        r.status_code = status
+        r._content = json.dumps(body).encode() if body is not None else b""
+        r.headers = CaseInsensitiveDict(headers or {})
+        r.url = request.url
+        r.request = request
+        r.encoding = "utf-8"
+        return r
+
+    def close(self):
+        pass
+
+
+def _real_session(script):
+    s = _requests.Session()
+    s.trust_env = False
+    adapter = _RouteAdapter(script)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s, adapter
+
+
+@pytest.mark.parametrize("hop, carries_auth", [
+    ("https://cdn.other.example/r", False),
+    ("https://seller.example/r", True),
+])
+def test_a_cross_host_paid_hop_does_not_carry_the_sessions_credentials(hop, carries_auth):
+    # requests' own redirect handling (rebuild_auth) drops Authorization on a host change;
+    # following the paid hops by hand must not undo that.
+    session, adapter = _real_session([
+        (402, fixture("web_search_402.json"), None),
+        (302, None, {"Location": hop}),
+        (200, fixture("web_search_200.json"), None),
+    ])
+    session.auth = ("user", "secret")
+    session.headers["Authorization"] = "Bearer X"
+    session.cookies.set("sid", "s3cret")
+    payer = RecordingPayer("c" * 64)
+    search = PayPerCallSearch("q", payer=payer, session=session, endpoint=ENDPOINT)
+    assert len(search.search()) > 0
+    challenge_req, paid_req, hop_req = adapter.sent
+    assert "Authorization" in challenge_req.headers and "Authorization" in paid_req.headers
+    assert paid_req.headers["X-PAYMENT"] == "c" * 64
+    assert hop_req.url == hop
+    assert hop_req.headers["X-PAYMENT"] == "c" * 64, "the hop that serves the paid call still gets the hash"
+    assert ("Authorization" in hop_req.headers) is carries_auth
+    assert ("Cookie" in hop_req.headers) is carries_auth
+
+
+def test_a_non_ascii_location_is_decoded_the_way_requests_does():
+    # requests re-decodes a latin-1-read UTF-8 Location; the raw header would be mojibake.
+    target = "https://seller.example/résultats"
+    raw = target.encode("utf-8").decode("latin-1")
+    session, adapter = _real_session([
+        (402, fixture("web_search_402.json"), None),
+        (302, None, {"Location": raw}),
+        (200, fixture("web_search_200.json"), None),
+    ])
+    assert len(PayPerCallSearch("q", payer=RecordingPayer(), session=session, endpoint=ENDPOINT).search()) > 0
+    assert adapter.sent[2].url == "https://seller.example/r%C3%A9sultats"
+
+
+def test_a_real_session_refuses_a_plain_http_paid_hop_before_sending_the_hash():
+    session, adapter = _real_session([
+        (402, fixture("web_search_402.json"), None),
+        (302, None, {"Location": "http://seller.example/r"}),
+    ])
+    payer = RecordingPayer("d" * 64)
+    search = PayPerCallSearch("q", payer=payer, session=session, endpoint=ENDPOINT)
+    assert search.search() == []
+    assert len(adapter.sent) == 2
+    assert search.last_payment == "d" * 64

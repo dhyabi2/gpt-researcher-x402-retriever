@@ -13,6 +13,7 @@ Researcher reads one. It does not read one today (see ``register`` below), so
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import re
@@ -38,9 +39,9 @@ USER_AGENT = "gpt-researcher-x402-retriever/0.1 (+https://github.com/dhyabi2/gpt
 _SITE = re.compile(r"\bsite:\S+", re.IGNORECASE)
 #: The statuses ``requests`` follows as a redirect.
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
-#: How many hops the paid retry follows. ``requests``' own ceiling is 30; a paid
-#: search needs a couple, and a shorter leash costs nothing.
-MAX_PAID_REDIRECTS = 5
+#: How many hops the paid retry follows: ``requests``' own default ceiling
+#: (``requests.models.DEFAULT_REDIRECT_LIMIT``), so no chain main followed is cut short.
+MAX_PAID_REDIRECTS = 30
 
 
 class PayPerCallSearch(_Base):
@@ -105,22 +106,60 @@ class PayPerCallSearch(_Base):
             text = f"{text} " + " OR ".join(f"site:{d}" for d in self.query_domains)
         return text
 
-    def _request(
-        self,
-        url: str,
-        params: Optional[Dict[str, str]],
-        extra_headers: Optional[Dict[str, str]] = None,
-        *,
-        allow_redirects: bool,
-    ):
-        headers = {"Accept": "application/json", "User-Agent": USER_AGENT, **(extra_headers or {})}
-        return self._session.get(
-            url, params=params, headers=headers, timeout=self.timeout, allow_redirects=allow_redirects,
-        )
+    def _headers(self, extra_headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        return {"Accept": "application/json", "User-Agent": USER_AGENT, **(extra_headers or {})}
 
     def _get(self, extra_headers: Optional[Dict[str, str]] = None):
-        """The unpaid request. Redirects are followed, and `_check_offer` checks where it went."""
-        return self._request(self.endpoint, {"q": self._query_text()}, extra_headers, allow_redirects=True)
+        """The unpaid request, exactly as before: redirects are the session's own business,
+        and `_check_offer` checks where the 402 came from. No ``allow_redirects=`` is passed,
+        so a user-injected ``session=`` whose ``get()`` does not take it still works."""
+        return self._session.get(
+            self.endpoint, params={"q": self._query_text()}, headers=self._headers(extra_headers),
+            timeout=self.timeout,
+        )
+
+    def _can_refuse_redirects(self) -> bool:
+        """Whether ``session.get`` accepts ``allow_redirects=``. Checked BEFORE paying.
+
+        The paid retry must not let the session follow a redirect on its own (that is how
+        `X-PAYMENT` reached a plain-HTTP hop). A ``get()`` that cannot be told so may or may
+        not follow redirects, and that is not knowable from here -- so such a session is
+        never paid with: the XNO is not sent, rather than sent and the hash then put at risk.
+        Free (200) answers still work with it.
+        """
+        get = getattr(self._session, "get", None)
+        if isinstance(self._session, requests.Session):
+            return True
+        try:
+            params = inspect.signature(get).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(p.name == "allow_redirects" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
+
+    def _paid_hop(self, url: str, params: Optional[Dict[str, str]], headers: Dict[str, str], same_origin: bool):
+        """One hop of the paid retry, never following a redirect itself.
+
+        On a hop to another origin (scheme, host, port) than the endpoint, the session's
+        credentials stay behind, as `requests`' own redirect handling (`rebuild_auth`) does:
+        no ``Authorization`` (from ``session.auth``, ``session.headers`` or netrc) and no
+        ``Cookie`` header. `X-PAYMENT` is still sent, as before: it is what the hop serves.
+        """
+        if same_origin or not isinstance(self._session, requests.Session):
+            return self._session.get(url, params=params, headers=headers, timeout=self.timeout, allow_redirects=False)
+        session = self._session
+        prepared = session.prepare_request(
+            requests.Request("GET", url, params=params, headers=headers, auth=_no_auth)
+        )
+        prepared.headers.pop("Authorization", None)
+        prepared.headers.pop("Cookie", None)
+        settings = session.merge_environment_settings(prepared.url, {}, None, None, None)
+        return session.send(prepared, allow_redirects=False, timeout=self.timeout, **settings)
+
+    def _redirect_target(self, response) -> Optional[str]:
+        if isinstance(self._session, requests.Session):
+            # Re-decodes a latin-1-mangled UTF-8 Location the way `requests` itself does.
+            return self._session.get_redirect_target(response)
+        return response.headers.get("location")
 
     def _get_paid(self, block_hash: str):
         """The paid retry, which follows a redirect only while it stays on HTTPS.
@@ -151,14 +190,15 @@ class PayPerCallSearch(_Base):
         on HTTPS is still followed, exactly as a redirect chain that stays on HTTPS is
         still paid above. Only the hop that cannot be trusted with the hash is refused.
         """
-        headers = {"X-PAYMENT": block_hash}
+        headers = self._headers({"X-PAYMENT": block_hash})
         url: str = self.endpoint
         params: Optional[Dict[str, str]] = {"q": self._query_text()}
+        origin = _origin(self.endpoint)
         for _ in range(MAX_PAID_REDIRECTS + 1):
-            response = self._request(url, params, headers, allow_redirects=False)
+            response = self._paid_hop(url, params, headers, same_origin=_origin(url) == origin)
             if response.status_code not in _REDIRECT_CODES:
                 return response
-            location = response.headers.get("location")
+            location = self._redirect_target(response)
             if not location:
                 return response
             # `requests` resolves a relative Location against the URL it asked for and
@@ -197,6 +237,12 @@ class PayPerCallSearch(_Base):
                 offer.amount_xno, offer.pay_to,
             )
             return None
+        if not self._can_refuse_redirects():
+            # Before paying, not after: see `_can_refuse_redirects`.
+            raise TermsError(
+                "the injected session's get() does not accept allow_redirects=, so the paid retry "
+                "could not be kept off a plain-HTTP redirect hop -- not paying"
+            )
 
         block_hash = payer.pay(offer)
         if not isinstance(block_hash, str) or not BLOCK_HASH.match(block_hash):
@@ -305,6 +351,21 @@ def _install(module) -> bool:
     get_retriever.__doc__ = previous.__doc__
     module.get_retriever = get_retriever
     return True
+
+
+def _no_auth(request):
+    """An explicit no-op auth, so `requests` applies neither ``session.auth`` nor netrc."""
+    return request
+
+
+def _origin(url: str):
+    parts = urlparse(url)
+    scheme = (parts.scheme or "").lower()
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return scheme, (parts.hostname or "").lower(), port or {"https": 443, "http": 80}.get(scheme)
 
 
 def _json_or_none(response) -> Any:

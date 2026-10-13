@@ -77,7 +77,12 @@ assignment where the instance is built. There is no environment-only setup today
    stays on HTTPS**, and the hop is checked before the header is sent: `X-PAYMENT` is the single-use
    claim on the call just paid for, so a plain-HTTP hop would hand it to anyone on the path, who
    could present it to the real seller and take the search -- and the hop's own body would come back
-   as the paid results. A paid retry redirected within HTTPS is still followed and served. If the
+   as the paid results. A paid retry redirected within HTTPS is still followed and served, up to 30
+   hops (`requests`' own limit). On a hop to a different host than the endpoint, your session's
+   `Authorization` (from `session.auth`, `session.headers` or netrc) and cookies are not sent, as
+   `requests` itself does on a cross-host redirect; `X-PAYMENT` is. If you inject your own `session=`,
+   its `get()` must accept `allow_redirects=` for the retriever to pay at all: one that cannot be told
+   not to follow redirects is never paid with (free answers still work). If the
    paid retry isn't served, it never pays again for that call. The hash stays on
    `retriever.last_payment` so you can take it up with the seller.
 

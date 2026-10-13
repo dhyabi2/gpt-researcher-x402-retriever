@@ -1,7 +1,7 @@
 # gpt-researcher-x402-retriever - audit 2026-10-13
 
 Base: `24f8757` (main, "refuse a 402 reached through a plain-HTTP redirect hop (#11)").
-Environment: Python 3.11, `pip install -e '.[test]'`. Suite before any change: **76 passed, 3 skipped**.
+Environment: Python 3.11, `pip install -e '.[test]'` (the before count; the after count below also has `.[feeless402]`). Suite before any change: **76 passed, 3 skipped**.
 
 ## Checked
 
@@ -43,12 +43,20 @@ Fix: `_get_paid` follows the paid retry's redirects itself with `allow_redirects
 each `Location`'s scheme **before** the header is sent, and refuses a non-HTTPS hop with a message
 that names the block hash for a refund claim. A redirect that stays on HTTPS is still followed and
 served, matching the existing controls for the challenge request. Hops are capped at
-`MAX_PAID_REDIRECTS = 5`.
+`MAX_PAID_REDIRECTS = 30`, `requests`' own default. A hop to another origin than the endpoint is
+sent without the session's `Authorization` and `Cookie` (what `requests`' `rebuild_auth` does on a
+host change), and `Location` is read through `Session.get_redirect_target` when the session is a
+`requests.Session`. The unpaid request calls `session.get` exactly as before (no `allow_redirects`);
+a user-injected session whose `get()` does not accept `allow_redirects` is refused before paying,
+since the paid retry could not be kept off a plain-HTTP hop with it, and still gets free results.
 
 Tests: `test_the_payment_hash_is_never_sent_over_a_plain_http_redirect_hop` (fails on the pre-fix
 tree, naming the leaked hash) and the control
 `test_a_paid_retry_redirected_within_https_is_still_followed_and_served`. The two test fakes that
-call `session.get` gained the `allow_redirects` keyword. Suite after: **78 passed, 3 skipped**.
+call `session.get` gained the `allow_redirects` keyword; a main-style session (no
+`allow_redirects`) is tested separately, plus a real `requests.Session` over a mocked adapter for the
+cross-host credential rule, the non-ASCII `Location` and the plain-HTTP refusal. Suite after, with
+`pip install -e '.[test]'` and `pip install -e '.[feeless402]'` (as CI): **89 passed, 2 skipped**.
 The real-server probe above re-run against the fixed tree: `plain-HTTP origin saw X-PAYMENT: []`.
 
 ## Found, NOT changed
@@ -63,6 +71,6 @@ The real-server probe above re-run against the fixed tree: `plain-HTTP origin sa
 ## Could not verify
 
 - The live seller path (`tests/test_live.py`, `X402_LIVE=1`) was not run: it needs a funded wallet
-  and a real payment. The 3 skipped tests are those plus the two optional-dependency cases.
-- `Feeless402Payer` against a real `feeless402` wallet: the extra is not installed here, so only
-  its call shape is covered (by the existing monkeypatched test).
+  and a real payment. With the `feeless402` extra installed, 2 tests are skipped: the live test and the GPT Researcher plugin test (`gpt_researcher` not installed).
+- `Feeless402Payer` against a real, funded `feeless402` wallet: the extra is installed for the
+  after count, but no wallet was funded, so no real send was made.
