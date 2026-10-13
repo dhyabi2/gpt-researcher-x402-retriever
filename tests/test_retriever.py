@@ -208,7 +208,7 @@ def test_offers_on_other_rails_are_not_payable(mutate):
 @pytest.mark.parametrize("amount", ["0", "-1", "1e26", 1e26, "0.0001", "", "\u00b2", "\u0663", "100\n",
                                     "1" * 4301, "9" * 50000])
 def test_amount_must_be_a_positive_integer_raw_string(amount):
-    """The last two are `str.isdigit()` but not raw.
+    """`"\u00b2"` and `"\u0663"` are `str.isdigit()` but not raw.
 
     `"\u00b2"` is `isdigit()` and not `int()`-able, so the old check reached `int(amount)` and let a
     bare `ValueError` out of a function whose documented failure is `TermsError` - and `TermsError`
@@ -236,6 +236,35 @@ def test_the_longest_payable_amount_is_still_accepted():
     for digits in (39, MAX_AMOUNT_DIGITS):
         body["accepts"][0]["amount"] = "1" * digits
         assert parse_challenge(body, None, DEFAULT_ENDPOINT).amount_raw == int("1" * digits)
+
+
+def test_leading_zeros_do_not_count_toward_the_digit_cap():
+    """`"0"*48 + "1"` is 1 raw and parsed on main; the cap is on significant digits."""
+    body = fixture("web_search_402.json")
+    body["accepts"][0]["amount"] = "0" * 48 + "1"
+    assert parse_challenge(body, None, DEFAULT_ENDPOINT).amount_raw == 1
+    body["accepts"][0]["amount"] = "0" * 5000 + "1" * MAX_AMOUNT_DIGITS
+    assert parse_challenge(body, None, DEFAULT_ENDPOINT).amount_raw == int("1" * MAX_AMOUNT_DIGITS)
+    for zeros in ("", "0", "0" * 49, "0" * 5000):
+        body["accepts"][0]["amount"] = zeros
+        with pytest.raises(TermsError, match="not a positive integer"):
+            parse_challenge(body, None, DEFAULT_ENDPOINT)
+
+
+def test_an_absurd_amount_gets_a_short_message_of_its_own():
+    """A 1,000,000-digit amount must not become a 1 MB exception message (and log line)."""
+    body = fixture("web_search_402.json")
+    body["accepts"][0]["amount"] = "7" * 1_000_000
+    with pytest.raises(TermsError) as info:
+        parse_challenge(body, None, DEFAULT_ENDPOINT)
+    message = str(info.value)
+    assert len(message) < 200
+    assert f"amount has 1000000 digits; at most {MAX_AMOUNT_DIGITS}" in message
+    body["accepts"][0]["amount"] = "x" * 1_000_000
+    with pytest.raises(TermsError, match="not a positive integer") as info:
+        parse_challenge(body, None, DEFAULT_ENDPOINT)
+    assert len(str(info.value)) < 200
+
 
 @pytest.mark.parametrize("pay_to", ["", "nano_short", "0xabc", VEND_PAY_TO + "x", VEND_PAY_TO.replace("nano_1", "nano_2")])
 def test_pay_to_must_be_a_nano_address(pay_to):
