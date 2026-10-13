@@ -73,8 +73,26 @@ assignment where the instance is built. There is no environment-only setup today
 4. **With no payer configured (the default), nothing is paid.** The price is logged, and
    `search()` returns `[]`, so GPT Researcher carries on with your other retrievers.
 5. **With a payer**, the payer sends exactly that amount and returns the block hash. The retriever
-   then retries once with `X-PAYMENT: <block hash>`. If the paid retry isn't served, it never pays
-   again for that call. The hash stays on `retriever.last_payment` so you can take it up with the seller.
+   then retries once with `X-PAYMENT: <block hash>`. **That retry follows a redirect only while it
+   stays on HTTPS**, and the hop is checked before the header is sent: `X-PAYMENT` is the single-use
+   claim on the call just paid for, so a plain-HTTP hop would hand it to anyone on the path, who
+   could present it to the real seller and take the search -- and the hop's own body would come back
+   as the paid results. A paid retry redirected within HTTPS is still followed and served, up to 30
+   hops (`requests`' own limit). Each hop's scheme and host are judged on the URL as `requests` will
+   send it. A hop on the endpoint's own origin goes through your `requests.Session`'s `request()`
+   (or an overridden `get()` that accepts `allow_redirects=`), so a session that signs requests there,
+   such as requests-oauthlib's `OAuth2Session`, signs the paid retry too. A `get()` override that does
+   not accept `allow_redirects=` is not called on the paid retry; `request()` is used instead, so
+   credentials such an override adds are not on the paid retry. A hop to a different host is built
+   without your session's `Authorization` (from `session.auth`, `session.headers` or netrc) and
+   without a `Cookie` from `session.headers`; jar cookies scoped to the new host are still sent, as
+   `requests` itself does on a cross-host redirect, and so is `X-PAYMENT`. Any other injected
+   `session=` must have a `get()` that accepts `allow_redirects=` for the retriever to pay at all (one
+   that does not is never paid with; free answers still work), **and it must honour
+   `allow_redirects=False`**: a `get()` that accepts the keyword and ignores it (a `**kwargs` wrapper,
+   a response hook that follows redirects) cannot be detected and would follow the hop itself. If the
+   paid retry isn't served, it never pays again for that call. The hash stays on
+   `retriever.last_payment` so you can take it up with the seller.
 
 Results are `[{"href", "body", "title"}]`: links and snippets. The retriever declares
 `requires_scraping = True`, so GPT Researcher fetches each page itself and keeps a real citation.
