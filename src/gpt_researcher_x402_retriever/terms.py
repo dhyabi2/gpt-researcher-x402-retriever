@@ -35,6 +35,11 @@ BLOCK_HASH = re.compile(r"^[0-9A-Fa-f]{64}\Z")
 #: An amount in raw is ASCII decimal digits. ``str.isdigit()`` is not that test: it is also true
 #: for "\u00b2", which ``int()`` then refuses, and for "\u0663", which is not what a seller wrote.
 RAW_AMOUNT = re.compile(r"^[0-9]+\Z")
+#: Most digits an offer amount may carry. The entire XNO supply is 39 digits of raw
+#: (133248297000000000000000000000000000000), so nothing payable is longer; the cap exists
+#: because `int()` itself refuses a string past 4300 digits with a bare `ValueError`, which
+#: is not this module's documented failure. See `parse_challenge`.
+MAX_AMOUNT_DIGITS = 48
 _B32 = {c: i for i, c in enumerate("13456789abcdefghijkmnopqrstuwxyz")}
 
 
@@ -161,7 +166,19 @@ def parse_challenge(body: Any, payment_required_header: Optional[str], request_u
         if (accept.get("scheme"), accept.get("network"), accept.get("asset")) != ("exact", "nano:mainnet", "XNO"):
             continue
         amount = accept.get("amount")
-        if not isinstance(amount, str) or not RAW_AMOUNT.match(amount) or int(amount) <= 0:
+        # The length cap is part of the shape test, not decoration. `int()` refuses a decimal
+        # string of more than `sys.int_info.str_digits_check_threshold` digits (4300 by
+        # default, CVE-2020-10735) with a bare `ValueError`, so a seller quoting 4301 digits
+        # reached `int(amount)` and raised out of a function whose documented failure is
+        # `TermsError` - and `TermsError` subclasses `ValueError`, so `except TermsError`
+        # does not catch it. That is the same hole the "\u00b2" case in
+        # `test_amount_must_be_a_positive_integer_raw_string` was added for, reached by
+        # length instead of by script. 39 digits is the whole supply in raw
+        # (`133248297…` raw, 39 digits); 48 leaves room for a seller who pads with zeros and
+        # still refuses the absurd long before `int()` does.
+        if not isinstance(amount, str) or not RAW_AMOUNT.match(amount) or len(amount) > MAX_AMOUNT_DIGITS:
+            raise TermsError(f"offer amount is not a positive integer raw string: {amount!r}")
+        if int(amount) <= 0:
             raise TermsError(f"offer amount is not a positive integer raw string: {amount!r}")
         pay_to = accept.get("payTo")
         if not valid_nano_address(pay_to):

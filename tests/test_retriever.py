@@ -9,6 +9,7 @@ from gpt_researcher_x402_retriever import PayPerCallSearch, set_default_payer
 from gpt_researcher_x402_retriever.retriever import DEFAULT_ENDPOINT
 from gpt_researcher_x402_retriever.terms import (
     BLOCK_HASH,
+    MAX_AMOUNT_DIGITS,
     NANO_ADDRESS,
     RAW_AMOUNT,
     TermsError,
@@ -204,19 +205,37 @@ def test_offers_on_other_rails_are_not_payable(mutate):
         parse_challenge(body, None, DEFAULT_ENDPOINT)
 
 
-@pytest.mark.parametrize("amount", ["0", "-1", "1e26", 1e26, "0.0001", "", "\u00b2", "\u0663", "100\n"])
+@pytest.mark.parametrize("amount", ["0", "-1", "1e26", 1e26, "0.0001", "", "\u00b2", "\u0663", "100\n",
+                                    "1" * 4301, "9" * 50000])
 def test_amount_must_be_a_positive_integer_raw_string(amount):
     """The last two are `str.isdigit()` but not raw.
 
     `"\u00b2"` is `isdigit()` and not `int()`-able, so the old check reached `int(amount)` and let a
     bare `ValueError` out of a function whose documented failure is `TermsError` - and `TermsError`
     subclasses `ValueError`, so `except TermsError` does not catch it.
+
+    The last two reach that same hole by LENGTH rather than by script. `int()` refuses a decimal
+    string of more than 4300 digits outright (`sys.int_info.str_digits_check_threshold`,
+    CVE-2020-10735): measured on the shipped code, a seller quoting 4301 digits produced
+    `ValueError: Exceeds the limit (4300 digits) for integer string conversion`, straight out of
+    `parse_challenge`. `RAW_AMOUNT` matched it, because it tests the characters and not how many.
     """
     body = fixture("web_search_402.json")
     body["accepts"][0]["amount"] = amount
     with pytest.raises(TermsError):
         parse_challenge(body, None, DEFAULT_ENDPOINT)
 
+
+def test_the_longest_payable_amount_is_still_accepted():
+    """The cap must sit above anything a seller could honestly quote.
+
+    The whole XNO supply is 133248297000000000000000000000000000000 raw - 39 digits - so a
+    48-digit cap refuses nothing payable, with nine digits of room for a seller who pads.
+    """
+    body = fixture("web_search_402.json")
+    for digits in (39, MAX_AMOUNT_DIGITS):
+        body["accepts"][0]["amount"] = "1" * digits
+        assert parse_challenge(body, None, DEFAULT_ENDPOINT).amount_raw == int("1" * digits)
 
 @pytest.mark.parametrize("pay_to", ["", "nano_short", "0xabc", VEND_PAY_TO + "x", VEND_PAY_TO.replace("nano_1", "nano_2")])
 def test_pay_to_must_be_a_nano_address(pay_to):
