@@ -100,8 +100,10 @@ over [feeless402](https://pypi.org/project/feeless402/). Its self-custodied wall
 directly through the included `Feeless402Payer`:
 
 ```bash
-pip install "gpt-researcher-x402-retriever[feeless402]"   # or install openai-agents-nano-x402
-nano-pay init                                             # creates ~/.nano-pay/wallet.json locally
+# Neither this project nor openai-agents-nano-x402 is on PyPI, so the extra goes on the git URL
+# (`pip install "gpt-researcher-x402-retriever[feeless402]"` answers "No matching distribution").
+pip install "gpt-researcher-x402-retriever[feeless402] @ git+https://github.com/dhyabi2/gpt-researcher-x402-retriever"
+nano-pay init                                             # feeless402's CLI; writes ~/.nano-pay/wallet.json locally
 # fund that address with a small amount of XNO, then:
 export X402_PAYER=gpt_researcher_x402_retriever.payers:Feeless402Payer
 export X402_MAX_XNO=0.0001
