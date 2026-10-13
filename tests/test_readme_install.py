@@ -68,7 +68,8 @@ def canonical(name):
 def _ours(url, repo):
     """True only for a URL that installs github.com/dhyabi2/<repo> itself.
 
-    Three forms, nothing else: ``git+https://github.com/dhyabi2/<repo>[.git][@ref]``, a GitHub
+    Four forms, nothing else: ``git+https://github.com/dhyabi2/<repo>[.git][@ref]``, the same over
+    ``git+ssh://git@github.com/...``, a GitHub
     ``/archive/....zip|.tar.gz`` of that repo, or its ``codeload.github.com`` equivalent; each may
     end in a ``#fragment``. No ``..``, ``//``, ``%`` or ``\\`` anywhere, so a path cannot walk back
     out of the repository (``/dhyabi2/<repo>/../../someone/evil``).
@@ -81,6 +82,7 @@ def _ours(url, repo):
     fragment = r"(?:#[^#]*)?"
     forms = (
         r"git\+https://(?:www\.)?github\.com/%s/%s(?:\.git)?/?(?:@[^@#?]+)?" % (owner, repo),
+        r"git\+ssh://git@github\.com/%s/%s(?:\.git)?/?(?:@[^@#?]+)?" % (owner, repo),
         r"https://(?:www\.)?github\.com/%s/%s/archive/[^#?]+\.(?:zip|tar\.gz)" % (owner, repo),
         r"https://codeload\.github\.com/%s/%s/(?:legacy\.)?(?:zip|tar\.gz)/[^#?]+" % (owner, repo),
     )
@@ -122,6 +124,16 @@ def _check_extras(extras, where):
     ]
 
 
+def _last_segment(url):
+    """The URL path's last segment, without a `#fragment`, `?query`, `@ref`, trailing `/` or `.git`."""
+    rest = re.split(r"[#?]", url, maxsplit=1)[0]
+    if "://" not in rest:
+        return None
+    path = rest.split("://", 1)[1].partition("/")[2]  # drop the host (and any user@ in it)
+    path = path.split("@", 1)[0].rstrip("/")
+    return re.sub(r"\.git$", "", path.rsplit("/", 1)[-1], flags=re.I) or None
+
+
 def _bare_url(url):
     """A URL with no `name @` in front: judge the project it names by its repo path or #egg=."""
     found, named = [], set()
@@ -132,6 +144,11 @@ def _bare_url(url):
             named.add(canonical(match.group("name")))
             if canonical(match.group("name")) == DIST:
                 found.extend(_check_extras(match.group("extras"), url))
+    # Whatever the host or scheme (gitub.com, gitlab.com, htps://), a URL whose last path segment
+    # is the name of one of ours must be that project's own repository.
+    last = _last_segment(url)
+    if last is not None and canonical(last) in {canonical(r): n for n, r in NOT_ON_PYPI.items()}:
+        named.add({canonical(r): n for n, r in NOT_ON_PYPI.items()}[canonical(last)])
     repo_match = _GITHUB_REPO.match(url)
     if repo_match:
         owner, repo = repo_match.group(1), re.sub(r"\.git$", "", repo_match.group(2), flags=re.I)
@@ -343,6 +360,10 @@ BAD = [
     '```\npip install -e "git+https://github.com/someone/x#egg=gpt-researcher-x402-retriever"\n```',
     "```\npip install git+https://github.com/dhyabi2/gpt-researcher-x402-retriever/../../someone/evil\n```",
     "```\npip install git+https://github.com/dhyabi2/gpt-researcher-x402-retreiver\n```",
+    # the right path on a wrong host or scheme
+    "```\npip install git+https://gitub.com/dhyabi2/gpt-researcher-x402-retriever\n```",
+    "```\npip install git+https://gitlab.com/dhyabi2/gpt-researcher-x402-retriever\n```",
+    "```\npip install git+htps://github.com/dhyabi2/gpt-researcher-x402-retriever\n```",
     "```\npip install https://github.com/dhyabi2/gpt-researcher-x402-retriever/archive/main.zip/../../x.zip\n```",
     # extras must exist in pyproject.toml
     '```\npip install "gpt-researcher-x402-retriever[feeles402] @ %s"\n```' % GIT,
@@ -357,6 +378,7 @@ GOOD = [
     '```\npip install "gpt-researcher-x402-retriever @ '
     'https://github.com/dhyabi2/gpt-researcher-x402-retriever/archive/refs/heads/main.zip"\n```',
     '```\npip install -e ".[test]"\n```',
+    "```\npip install git+ssh://git@github.com/dhyabi2/gpt-researcher-x402-retriever.git@main\n```",
     "```\npip install -e %s#egg=gpt-researcher-x402-retriever\n```" % GIT,
     "```\npip install feeless402 requests\n```",
     "```\npython3 -m pip install -r requirements.txt \\\n  \"openai-agents-nano-x402 @ "
