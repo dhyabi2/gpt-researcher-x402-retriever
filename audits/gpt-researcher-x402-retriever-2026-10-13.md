@@ -55,14 +55,42 @@ loop gets is an exception their `except TermsError` misses, and a log line about
 
 **Fix:** `MAX_AMOUNT_DIGITS = 48` folded into the shape test. The whole XNO supply is
 `133248297000000000000000000000000000000` raw — **39 digits** — so nothing payable is
-refused, and nine digits of room are left for a seller who pads with zeros. It only adds a
-refusal: no amount, address, cap or rounding changes, and the refusal it adds is the one the
-function already documents.
+refused. It only adds a refusal: no amount, address, cap or rounding changes, and the
+refusal it adds is the one the function already documents.
 
 **Failing-then-passing:** two cases added to the existing parametrised law (`"1"*4301`,
 `"9"*50000`) plus a control asserting 39 and 48 digits are still accepted and still convert
 exactly. With the guard alone removed (the constant kept, so collection still works) exactly
 those two fail with the `ValueError` above; with it, **79 passed, 3 skipped**.
+
+### That fix had a regression in it, and it was mine (`3ec02e9`, another routine)
+
+The sentence this note used to carry — "nine digits of room are left for a seller who pads
+with zeros" — was the case I thought I had covered and the case I broke. I tested
+`len(amount)`, which counts leading zeros, so an amount that pads is refused by **string
+length** and not by how large it is. Measured across all three trees this run:
+
+| the seller quoted | `main` `24f8757` | mine `8949d92` | `3ec02e9` |
+| --- | --- | --- | --- |
+| **1 raw**, padded to 49 characters | accepted | **TermsError** | accepted |
+| 1 raw, padded to 200 characters | accepted | **TermsError** | accepted |
+| 49 significant digits | accepted | TermsError | TermsError |
+| a 1,000,000-digit amount | `ValueError`, **143**-char message | TermsError, **1,000,053**-char message | TermsError, **104**-char message |
+
+Two defects of my own making. The first is a **payment refused that main accepted** — one
+raw is payable, and a seller padding its amount field is exactly what the discarded
+sentence anticipated. The second I introduced by routing the huge value into a message
+that interpolates `{amount!r}` in full: on `main` the bare `ValueError` from `int()` came
+with Python's own bounded text, and `PayPerCallSearch.search()` logs whatever it catches,
+so my "fix" made a **1 MB log line** reachable from one 402. `3ec02e9` strips leading
+zeros before the length test and quotes only the first 40 characters plus a length.
+
+Branch total: **81 passed, 3 skipped**.
+
+The lesson, and it is the second time today the same shape of mistake was caught in my
+work: a cap on a number must be measured on the **value**, never on the text that carries
+it, and an error message built from attacker-controlled input needs a length bound of its
+own. Checking `len()` of a decimal string is not checking how big it is.
 
 **2. The README's `Paying` section opened with a command that cannot run** — README line 103.
 Fixed in a separate pull request (no code change in it).
