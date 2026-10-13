@@ -73,8 +73,13 @@ assignment where the instance is built. There is no environment-only setup today
 4. **With no payer configured (the default), nothing is paid.** The price is logged, and
    `search()` returns `[]`, so GPT Researcher carries on with your other retrievers.
 5. **With a payer**, the payer sends exactly that amount and returns the block hash. The retriever
-   then retries once with `X-PAYMENT: <block hash>`. If the paid retry isn't served, it never pays
-   again for that call. The hash stays on `retriever.last_payment` so you can take it up with the seller.
+   then retries once with `X-PAYMENT: <block hash>`. **That retry follows a redirect only while it
+   stays on HTTPS**, and the hop is checked before the header is sent: `X-PAYMENT` is the single-use
+   claim on the call just paid for, so a plain-HTTP hop would hand it to anyone on the path, who
+   could present it to the real seller and take the search -- and the hop's own body would come back
+   as the paid results. A paid retry redirected within HTTPS is still followed and served. If the
+   paid retry isn't served, it never pays again for that call. The hash stays on
+   `retriever.last_payment` so you can take it up with the seller.
 
 Results are `[{"href", "body", "title"}]`: links and snippets. The retriever declares
 `requires_scraping = True`, so GPT Researcher fetches each page itself and keeps a real citation.

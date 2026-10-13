@@ -594,11 +594,12 @@ class HeaderCheckingSession(FakeSession):
     `payer.pay` has sent the XNO, and `InvalidHeader`'s message does not say a payment was made.
     """
 
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=True):
         for name, value in (headers or {}).items():
             if isinstance(value, str) and ("\n" in value or "\r" in value):
                 raise ValueError(f"return character(s) in header value: {name}")
-        return super().get(url, params=params, headers=headers, timeout=timeout)
+        return super().get(url, params=params, headers=headers, timeout=timeout,
+                           allow_redirects=allow_redirects)
 
 
 def test_a_block_hash_with_a_trailing_newline_is_refused_before_it_reaches_a_header(caplog):
@@ -617,3 +618,120 @@ def test_the_three_patterns_do_not_end_at_a_newline():
     assert not NANO_ADDRESS.match(VEND_PAY_TO + "\n")
     assert not BLOCK_HASH.match("a" * 64 + "\n")
     assert not RAW_AMOUNT.match("100\n")
+
+
+# --- the PAID retry's redirect hops ------------------------------------------
+#
+# Everything above guards the CHALLENGE request. The paid retry one line later
+# had no guard at all, and it carries what the challenge did not: `X-PAYMENT`,
+# the hash of a send that has already confirmed on-chain and the single-use
+# claim on the call just paid for. `requests` follows redirects by default,
+# keeps a custom header across them, and does not refuse a scheme downgrade.
+#
+# Measured 2026-10-13 against a local TLS endpoint that answered the PAID
+# request with a 302 to a local plain-HTTP origin, through this class with a
+# real `requests.Session`:
+#
+#     endpoint        : https://localhost:34605/api/v1/web-search
+#     payer invoked   : 1 time -- 0.0001 XNO moved, irreversibly
+#     plain-HTTP origin saw X-PAYMENT:
+#                       B749B757EE750FC9AEA72F33CB429EACCD2ABEC9F2CCF59BF17AFAC304C9A58F
+#     results returned: the plain-HTTP origin's body, served as the paid answer
+#
+# Anyone on the path at that hop can present the same hash to the real seller
+# and take the search the agent paid for; and an unauthenticated origin's body
+# came back as the results a research run then cites.
+
+
+class RedirectingSession:
+    """Answers GETs from a url -> response map, following redirects like ``requests``.
+
+    Models the two behaviours that matter here: a redirect is followed unless
+    ``allow_redirects=False``, and the request headers (``X-PAYMENT`` among them) are
+    re-sent on every hop. ``sent`` records what was sent WHERE, so a test can assert
+    that a payment hash never reached a plain-HTTP origin.
+    """
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.sent = []
+
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=True):
+        history = []
+        for _ in range(10):
+            self.sent.append({"url": url, "headers": dict(headers or {})})
+            response = self.routes[url]
+            if response.status_code not in (301, 302, 303, 307, 308) or not allow_redirects:
+                response.url = url
+                response.history = [_HopUrl(u) for u in history]
+                return response
+            history.append(url)
+            url = response.headers["location"]
+            params = None
+        raise AssertionError("too many redirects in the fake")
+
+
+class _HopUrl:
+    def __init__(self, url):
+        self.url = url
+
+
+ENDPOINT = "https://seller.example/api/v1/web-search"
+PLAIN_HOP = "http://hop.example/api/v1/web-search"
+HTTPS_HOP = "https://cdn.seller.example/api/v1/web-search"
+
+
+def _paid_redirect_routes(hop):
+    """402 straight from the HTTPS endpoint, then the paid retry redirected to ``hop``."""
+    return {
+        ENDPOINT: FakeResponse(302, None, headers={"location": hop}),
+        hop: ok(),
+    }
+
+
+def test_the_payment_hash_is_never_sent_over_a_plain_http_redirect_hop():
+    routes = _paid_redirect_routes(PLAIN_HOP)
+    session = RedirectingSession(routes)
+    payer = RecordingPayer("e" * 64)
+    search = PayPerCallSearch("q", payer=payer, session=session, endpoint=ENDPOINT)
+    # The challenge arrives over HTTPS with no hops, so it is paid: that is the
+    # pre-condition, not the finding.
+    routes[ENDPOINT] = challenge()
+    first = session.get  # keep the recorder
+
+    def staged(url, params=None, headers=None, timeout=None, allow_redirects=True):
+        # The 402 first; from then on the endpoint answers the paid retry with a 302.
+        if (headers or {}).get("X-PAYMENT") is not None:
+            routes[ENDPOINT] = FakeResponse(302, None, headers={"location": PLAIN_HOP})
+        return first(url, params, headers, timeout, allow_redirects)
+
+    session.get = staged
+    results = search.search()
+    # The finding first: what was sent WHERE.
+    leaked = [s for s in session.sent
+              if s["url"].startswith("http://") and "X-PAYMENT" in s["headers"]]
+    assert leaked == [], f"the payment hash was sent to a plain-HTTP origin: {leaked}"
+    assert payer.offers, "the payment itself happened: this is about what comes after it"
+    assert search.last_payment == "e" * 64, "the hash is kept, for a refund claim"
+    assert results == [], "an unauthenticated origin's body is not the paid answer"
+
+
+def test_a_paid_retry_redirected_within_https_is_still_followed_and_served():
+    # The control, matching the controls above: only the hop that cannot be trusted
+    # with the hash is refused. A seller that redirects the paid request to its own
+    # HTTPS host is still followed, and its results are returned.
+    routes = _paid_redirect_routes(HTTPS_HOP)
+    session = RedirectingSession(routes)
+    payer = RecordingPayer("f" * 64)
+    search = PayPerCallSearch("q", payer=payer, session=session, endpoint=ENDPOINT)
+    routes[ENDPOINT] = challenge()
+    first = session.get
+
+    def staged(url, params=None, headers=None, timeout=None, allow_redirects=True):
+        if (headers or {}).get("X-PAYMENT") is not None:
+            routes[ENDPOINT] = FakeResponse(302, None, headers={"location": HTTPS_HOP})
+        return first(url, params, headers, timeout, allow_redirects)
+
+    session.get = staged
+    assert len(search.search()) > 0, "an HTTPS-only redirect on the paid retry must still be served"
+    assert [s["url"] for s in session.sent if "X-PAYMENT" in s["headers"]] == [ENDPOINT, HTTPS_HOP]

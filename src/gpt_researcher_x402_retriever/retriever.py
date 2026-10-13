@@ -17,7 +17,7 @@ import logging
 import os
 import re
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -36,6 +36,11 @@ DEFAULT_ENDPOINT = "https://search.paypercall.dev/api/v1/web-search"
 DEFAULT_MAX_XNO = "0.001"
 USER_AGENT = "gpt-researcher-x402-retriever/0.1 (+https://github.com/dhyabi2/gpt-researcher-x402-retriever)"
 _SITE = re.compile(r"\bsite:\S+", re.IGNORECASE)
+#: The statuses ``requests`` follows as a redirect.
+_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+#: How many hops the paid retry follows. ``requests``' own ceiling is 30; a paid
+#: search needs a couple, and a shorter leash costs nothing.
+MAX_PAID_REDIRECTS = 5
 
 
 class PayPerCallSearch(_Base):
@@ -100,9 +105,76 @@ class PayPerCallSearch(_Base):
             text = f"{text} " + " OR ".join(f"site:{d}" for d in self.query_domains)
         return text
 
-    def _get(self, extra_headers: Optional[Dict[str, str]] = None):
+    def _request(
+        self,
+        url: str,
+        params: Optional[Dict[str, str]],
+        extra_headers: Optional[Dict[str, str]] = None,
+        *,
+        allow_redirects: bool,
+    ):
         headers = {"Accept": "application/json", "User-Agent": USER_AGENT, **(extra_headers or {})}
-        return self._session.get(self.endpoint, params={"q": self._query_text()}, headers=headers, timeout=self.timeout)
+        return self._session.get(
+            url, params=params, headers=headers, timeout=self.timeout, allow_redirects=allow_redirects,
+        )
+
+    def _get(self, extra_headers: Optional[Dict[str, str]] = None):
+        """The unpaid request. Redirects are followed, and `_check_offer` checks where it went."""
+        return self._request(self.endpoint, {"q": self._query_text()}, extra_headers, allow_redirects=True)
+
+    def _get_paid(self, block_hash: str):
+        """The paid retry, which follows a redirect only while it stays on HTTPS.
+
+        `_check_offer` refuses a 402 that arrived over, or through, a plain-HTTP hop,
+        because the `payTo` address it carries could have been rewritten there. The paid
+        retry one line later had no such guard, and it carries something the challenge
+        did not: `X-PAYMENT`, the hash of a send that has already confirmed on-chain,
+        which is the single-use claim on the call just paid for. `requests` follows
+        redirects by default, keeps a custom header across them, and does not refuse a
+        scheme downgrade. Measured 2026-10-13 against a local TLS endpoint that answered
+        the *paid* request with a 302 to a local plain-HTTP origin, driven through this
+        class with a real `requests.Session`:
+
+            endpoint        : https://localhost:34605/api/v1/web-search
+            payer invoked   : 1 time -- 0.0001 XNO moved, irreversibly
+            plain-HTTP origin saw X-PAYMENT:
+                              B749B757EE750FC9AEA72F33CB429EACCD2ABEC9F2CCF59BF17AFAC304C9A58F
+            results returned: the plain-HTTP origin's body, served as the paid answer
+
+        Two harms, both after the money moved. Anyone on the path at that hop reads the
+        block hash and can present it to the real seller, consuming the call the agent
+        paid for -- the agent then gets "paid but not served" for a search someone else
+        received. And the body of an unauthenticated origin is handed back as the results
+        a research run goes on to cite.
+
+        So the hop is checked BEFORE the header is sent, not after: a redirect that stays
+        on HTTPS is still followed, exactly as a redirect chain that stays on HTTPS is
+        still paid above. Only the hop that cannot be trusted with the hash is refused.
+        """
+        headers = {"X-PAYMENT": block_hash}
+        url: str = self.endpoint
+        params: Optional[Dict[str, str]] = {"q": self._query_text()}
+        for _ in range(MAX_PAID_REDIRECTS + 1):
+            response = self._request(url, params, headers, allow_redirects=False)
+            if response.status_code not in _REDIRECT_CODES:
+                return response
+            location = response.headers.get("location")
+            if not location:
+                return response
+            # `requests` resolves a relative Location against the URL it asked for and
+            # carries no params over: the Location is the whole of the next request.
+            url = urljoin(getattr(response, "url", None) or url, location)
+            params = None
+            if urlparse(url).scheme != "https":
+                raise RuntimeError(
+                    f"paid (block {block_hash}) and the paid request was redirected to "
+                    f"{urlparse(url).scheme or 'a schemeless url'} ({url}) -- not sending the payment "
+                    f"hash over a hop anyone on the path could read. Keep the hash for a refund claim."
+                )
+        raise RuntimeError(
+            f"paid (block {block_hash}) but the paid request was still being redirected after "
+            f"{MAX_PAID_REDIRECTS} hops. Keep the hash for a refund claim."
+        )
 
     def _fetch(self) -> Any:
         response = self._get()
@@ -130,7 +202,7 @@ class PayPerCallSearch(_Base):
         if not isinstance(block_hash, str) or not BLOCK_HASH.match(block_hash):
             raise RuntimeError("payer did not return a 64-hex Nano block hash")
         self.last_payment = block_hash
-        paid = self._get({"X-PAYMENT": self.last_payment})
+        paid = self._get_paid(self.last_payment)
         if paid.status_code != 200:
             # Paid but not served: never pay again for this call. Keep the hash for a refund claim.
             raise RuntimeError(

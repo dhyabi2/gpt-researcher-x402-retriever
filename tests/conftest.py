@@ -46,8 +46,9 @@ class FakeSession:
         self.responses = list(responses)
         self.calls = []
 
-    def get(self, url, params=None, headers=None, timeout=None):
-        self.calls.append({"url": url, "params": dict(params or {}), "headers": dict(headers or {})})
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=True):
+        self.calls.append({"url": url, "params": dict(params or {}), "headers": dict(headers or {}),
+                           "allow_redirects": allow_redirects})
         if not self.responses:
             raise AssertionError("unexpected extra request")
         r = self.responses.pop(0)
