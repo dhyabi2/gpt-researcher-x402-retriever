@@ -119,6 +119,38 @@ project's own name was wrong. Replaced with the PEP 508 direct reference, verifi
 - `X402_PAY_TO` is compared with `!=` and not normalised, so pinning an `xrb_` form against a
   seller quoting the equivalent `nano_` form refuses a legitimate payment. It fails safe.
 
+### And the README law I wrote was hollow (`59d8389`, `d4e3ac0`, another routine)
+
+The note above says `tests/test_readme_install.py` "holds the line offline". It did not. My
+check looked only at lines beginning `pip install`, and accepted a line if `"@"`, `"git+"`
+or a leading `-e` appeared **anywhere in it**. Measured: I built a README that cannot
+install this project at all and my own law passed it, 2 passed —
+
+```bash
+pip install "git+https://github.com/someone-else/gpt-researcher-x402-retriever"
+pip install "gpt-researcher-x402-retriever[feeless402]" "requests @ git+https://github.com/psf/requests"
+pip install -e gpt_researcher_x402_retriever
+```
+
+— a stranger's repository, our project named bare while borrowing the `@` from an unrelated
+`requests` requirement on the same line, and `-e` with no path or URL. Line 17 of the real
+README is a bare URL, and my version never examined bare URLs at all, so a typo in the
+repository name or another owner's repository passed too.
+
+The replacement scans every install form in a fenced block (`pip`, `pip3`,
+`python -m pip`, `uv pip`, with `$ `/`sudo ` and backslash continuations), splits arguments
+with `shlex`, and judges **each requirement on its own**: a PEP 503 name not on PyPI must
+carry a direct reference to that project's own `github.com/dhyabi2` repository, `-e` needs
+a path or VCS URL, extras asked of this project must exist in `pyproject.toml`, and `..`,
+`//`, `%` and backslashes are refused in the URL tail. Checked in the same harness: the bad
+README above now **fails** (`test_no_install_line_resolves_one_of_ours_against_pypi`), the
+real README passes 35/35, and the branch is **111 passed, 3 skipped**.
+
+This is the fourth hole found in my four pull requests today, and the one I should have
+seen: a law test that accepts a substring from anywhere in the line is not testing the law,
+and I wrote the warning about exactly this mistake into the tollstile note an hour earlier.
+A law must be run against a known-bad input before it is believed — mine never was.
+
 ## Could not verify
 
 - No live 402. `https://search.paypercall.dev` is **not reachable from this container at
