@@ -124,10 +124,10 @@ class PayPerCallSearch(_Base):
         Checked BEFORE paying. The paid retry must not let the session follow a redirect on
         its own (that is how `X-PAYMENT` reached a plain-HTTP hop).
 
-        A `requests.Session` (or subclass) always can: its paid hops go through
-        ``prepare_request`` + ``send(allow_redirects=False)``, never through ``get()``, so a
-        subclass that narrows or overrides ``get()`` is neither relied on nor able to break
-        the retry after the XNO has moved.
+        A `requests.Session` (or subclass) always can: a same-origin paid hop goes through its
+        ``request(..., allow_redirects=False)`` (or an overridden ``get()`` that accepts the
+        keyword), a cross-origin one through ``prepare_request`` + ``send``. A narrowed
+        ``get()`` is never called on the paid retry, so it cannot break it after the XNO moved.
 
         Any other session needs a ``get()`` that accepts ``allow_redirects=``. One that does
         not may or may not follow redirects, which is not knowable from here -- so it is
@@ -137,12 +137,7 @@ class PayPerCallSearch(_Base):
         """
         if isinstance(self._session, requests.Session):
             return True
-        get = getattr(self._session, "get", None)
-        try:
-            params = inspect.signature(get).parameters.values()
-        except (TypeError, ValueError):
-            return False
-        return any(p.name == "allow_redirects" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
+        return _accepts_allow_redirects(getattr(self._session, "get", None))
 
     def _paid_hop(self, url: str, params: Optional[Dict[str, str]], headers: Dict[str, str], block_hash: str):
         """One hop of the paid retry, never following a redirect itself.
@@ -156,8 +151,11 @@ class PayPerCallSearch(_Base):
         * Another origin (scheme, host, port) than the endpoint, on a `requests.Session`:
           the session's credentials stay behind, as `requests`' own redirect handling
           (``rebuild_auth``) does -- no ``Authorization`` (``session.auth``,
-          ``session.headers`` or netrc) and no ``Cookie``. `X-PAYMENT` is still sent: it is
-          what the hop serves.
+          ``session.headers`` or netrc) and no ``Cookie`` from ``session.headers``; jar
+          cookies scoped to the new host are still sent. `X-PAYMENT` is still sent: it is what
+          the hop serves.
+        * Same origin, on a `requests.Session`: through ``request()`` (or a ``get()`` override
+          that accepts ``allow_redirects=``), so credentials a subclass adds there are kept.
         """
         target = _prepared_url(url, params)
         if urlparse(target).scheme != "https" or urlparse(url).scheme.lower() != "https":
@@ -170,14 +168,30 @@ class PayPerCallSearch(_Base):
         if not isinstance(session, requests.Session):
             return session.get(url, params=params, headers=headers, timeout=self.timeout, allow_redirects=False)
         same_origin = _origin(target) == _origin(_prepared_url(self.endpoint, None))
+        if same_origin:
+            # Through the session's own entry points, so a subclass that signs requests there
+            # (requests-oauthlib's OAuth2Session adds its token in request()) signs the paid
+            # retry too, as it signed the unpaid request. An overridden get() is used when it
+            # accepts allow_redirects=; a narrowed one is not called (it could not be told not
+            # to follow a redirect), and request() is used instead.
+            if _overrides_get(session) and _accepts_allow_redirects(session.get):
+                return session.get(url, params=params, headers=headers, timeout=self.timeout, allow_redirects=False)
+            return session.request(
+                "GET", url, params=params, headers=headers, timeout=self.timeout, allow_redirects=False,
+            )
+        # Another origin: built here so the session's credentials stay behind, as `requests`'
+        # own redirect handling does. No auth (a no-op auth keeps session.auth and netrc out),
+        # no Authorization or Cookie from session.headers; the cookie jar still adds cookies
+        # scoped to the new host, as `requests`' rebuild_cookies does.
+        stripped = {**headers, "Authorization": None}
+        if "Cookie" in session.headers:
+            stripped["Cookie"] = None
         prepared = session.prepare_request(
-            requests.Request("GET", url, params=params, headers=headers, auth=None if same_origin else _no_auth)
+            requests.Request("GET", url, params=params, headers=stripped, auth=_no_auth)
         )
         if urlparse(prepared.url).scheme != "https" or _origin(prepared.url) != _origin(target):
             raise RuntimeError(f"paid (block {block_hash}) and the paid hop did not prepare to {target}")
-        if not same_origin:
-            prepared.headers.pop("Authorization", None)
-            prepared.headers.pop("Cookie", None)
+        prepared.headers.pop("Authorization", None)
         settings = session.merge_environment_settings(prepared.url, {}, None, None, None)
         return session.send(prepared, allow_redirects=False, timeout=self.timeout, **settings)
 
@@ -372,6 +386,18 @@ def _install(module) -> bool:
     get_retriever.__doc__ = previous.__doc__
     module.get_retriever = get_retriever
     return True
+
+
+def _accepts_allow_redirects(func) -> bool:
+    try:
+        params = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.name == "allow_redirects" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
+
+
+def _overrides_get(session) -> bool:
+    return getattr(type(session), "get", None) is not requests.Session.get or "get" in vars(session)
 
 
 def _no_auth(request):

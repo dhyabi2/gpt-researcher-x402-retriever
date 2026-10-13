@@ -49,8 +49,13 @@ host change), and `Location` is read through `Session.get_redirect_target` when 
 `requests.Session`. Each hop's scheme and origin are read from the URL as `requests` prepares it, not
 from `urlparse` of the raw `Location` (they disagree on `https://evil.example\@seller.example/x`).
 The unpaid request calls `session.get` exactly as before (no `allow_redirects`). For a
-`requests.Session` or subclass the paid hops go through `prepare_request` + `send`, never `get()`,
-so a subclass with a narrowed `get()` is paid and served. Any other session whose `get()` does not
+`requests.Session` or subclass, a same-origin paid hop goes through `session.request(...,
+allow_redirects=False)` (or an overridden `get()` that accepts `allow_redirects`), so a session that
+signs in `request()` or `get()` (requests-oauthlib's `OAuth2Session`) signs the paid retry too; a
+narrowed `get()` is not called and `request()` is used instead (credentials only that override adds
+are then missing -- documented). A cross-origin hop goes through `prepare_request` + `send` with a
+no-op auth and without `Authorization` or a `session.headers` `Cookie`; jar cookies scoped to the
+new host are still sent. Any other session whose `get()` does not
 accept `allow_redirects` is refused before paying, and still gets free results; one that accepts the
 keyword but ignores it cannot be detected (documented in the README).
 
@@ -60,8 +65,9 @@ tree, naming the leaked hash) and the control
 call `session.get` gained the `allow_redirects` keyword; a main-style session (no
 `allow_redirects`) is tested separately, plus a real `requests.Session` over a mocked adapter for the
 cross-host credential rule, the backslash-userinfo `Location`, the non-ASCII `Location`, a `Session`
-subclass with a narrowed `get()`, and the plain-HTTP refusal. Suite after, CI-style (Python 3.11,
-`pip install -e '.[test]'` then `pip install -e '.[feeless402]'`, `pytest -q`): **92 passed, 2 skipped**.
+subclass with a narrowed `get()`, sessions that sign in `request()` / `get()`, a CDN that sets its
+own cookie, and the plain-HTTP refusal. Suite after, CI-style (Python 3.11,
+`pip install -e '.[test]'` then `pip install -e '.[feeless402]'`, `pytest -q`): **95 passed, 2 skipped**.
 The real-server probe above re-run against the fixed tree: `plain-HTTP origin saw X-PAYMENT: []`.
 
 ## Found, NOT changed

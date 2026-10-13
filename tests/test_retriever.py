@@ -834,7 +834,7 @@ def test_a_cross_host_paid_hop_does_not_carry_the_sessions_credentials(hop, carr
     ])
     session.auth = ("user", "secret")
     session.headers["Authorization"] = "Bearer X"
-    session.cookies.set("sid", "s3cret")
+    session.cookies.set("sid", "s3cret", domain="seller.example")
     payer = RecordingPayer("c" * 64)
     search = PayPerCallSearch("q", payer=payer, session=session, endpoint=ENDPOINT)
     assert len(search.search()) > 0
@@ -903,7 +903,7 @@ def test_a_backslash_userinfo_location_is_judged_on_the_url_requests_actually_se
     ])
     session.auth = ("user", "secret")
     session.headers["Authorization"] = "Bearer X"
-    session.cookies.set("sid", "s3cret")
+    session.cookies.set("sid", "s3cret", domain="seller.example")
     search = PayPerCallSearch("q", payer=RecordingPayer("9" * 64), session=session, endpoint=ENDPOINT)
     search.search()
     hop_req = adapter.sent[2]
@@ -923,3 +923,103 @@ def test_the_plain_http_refusal_is_computed_on_the_prepared_url():
     with pytest.raises(RuntimeError, match=r"redirected to http \(http://seller\.example/r\)"):
         search._fetch()
     assert len(adapter.sent) == 2, "nothing was sent to the plain-HTTP hop"
+
+
+import http.client  # noqa: E402
+import types  # noqa: E402
+
+
+class _FuncAdapter(BaseAdapter):
+    """A transport whose answer depends on the request: ``handler(request) -> (status, body, headers)``.
+
+    A ``Set-Cookie`` in ``headers`` is exposed the way urllib3 does, so the session's jar
+    picks it up exactly as on the wire.
+    """
+
+    def __init__(self, handler):
+        super().__init__()
+        self.handler = handler
+        self.sent = []
+
+    def send(self, request, **kwargs):
+        self.sent.append(request)
+        status, body, headers = self.handler(request)
+        msg = http.client.HTTPMessage()
+        for k, v in (headers or {}).items():
+            msg[k] = v
+        r = _requests.Response()
+        r.status_code = status
+        r._content = json.dumps(body).encode() if body is not None else b""
+        r.headers = CaseInsensitiveDict(headers or {})
+        r.raw = types.SimpleNamespace(_original_response=types.SimpleNamespace(msg=msg))
+        r.url = request.url
+        r.request = request
+        r.encoding = "utf-8"
+        return r
+
+    def close(self):
+        pass
+
+
+def _signed_seller(request):
+    """401 unsigned; 402 signed; 200 signed with X-PAYMENT."""
+    if request.headers.get("Authorization") != "Bearer TOKEN":
+        return 401, None, None
+    if "X-PAYMENT" not in request.headers:
+        return 402, fixture("web_search_402.json"), None
+    return 200, fixture("web_search_200.json"), None
+
+
+class _SignsInRequest(_requests.Session):
+    """Like requests-oauthlib's OAuth2Session: the token is added in request()."""
+
+    def request(self, method, url, *args, headers=None, **kwargs):
+        headers = dict(headers or {}, Authorization="Bearer TOKEN")
+        return super().request(method, url, *args, headers=headers, **kwargs)
+
+
+class _SignsInGet(_requests.Session):
+    def get(self, url, **kwargs):
+        kwargs["headers"] = dict(kwargs.get("headers") or {}, Authorization="Bearer TOKEN")
+        return super().get(url, **kwargs)
+
+
+@pytest.mark.parametrize("cls", [_SignsInRequest, _SignsInGet])
+def test_a_session_that_signs_its_requests_signs_the_paid_retry_too(cls):
+    session = cls()
+    session.trust_env = False
+    adapter = _FuncAdapter(_signed_seller)
+    session.mount("https://", adapter)
+    payer = RecordingPayer("7" * 64)
+    search = PayPerCallSearch("q", payer=payer, session=session, endpoint=ENDPOINT)
+    assert len(search.search()) > 0, "paid AND served"
+    assert len(payer.offers) == 1
+    assert [r.headers.get("X-PAYMENT") for r in adapter.sent] == [None, "7" * 64]
+
+
+def test_a_cross_host_hop_keeps_the_new_hosts_own_cookies_but_not_session_header_cookies():
+    # The CDN sets its own cookie and redirects to itself; it serves only with that cookie.
+    # A Cookie set in session.headers is the seller's and stays behind.
+    cdn = "https://cdn.other.example/r"
+
+    def handler(request):
+        if request.url.startswith(ENDPOINT):
+            if "X-PAYMENT" not in request.headers:
+                return 402, fixture("web_search_402.json"), None
+            return 302, None, {"Location": cdn}
+        assert "seller=1" not in request.headers.get("Cookie", ""), "session.headers Cookie leaked"
+        if request.url == cdn:
+            return 302, None, {"Location": cdn + "?t=1", "Set-Cookie": "edge=ok; Domain=cdn.other.example; Path=/"}
+        if "edge=ok" in request.headers.get("Cookie", ""):
+            return 200, fixture("web_search_200.json"), None
+        return 403, None, None
+
+    session = _requests.Session()
+    session.trust_env = False
+    adapter = _FuncAdapter(handler)
+    session.mount("https://", adapter)
+    session.headers["Cookie"] = "seller=1"
+    search = PayPerCallSearch("q", payer=RecordingPayer(), session=session, endpoint=ENDPOINT)
+    assert len(search.search()) > 0
+    assert adapter.sent[1].headers["Cookie"] == "seller=1", "same-origin paid request keeps it"
+    assert adapter.sent[3].headers["Cookie"] == "edge=ok"
