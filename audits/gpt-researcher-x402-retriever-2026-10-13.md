@@ -46,17 +46,22 @@ served, matching the existing controls for the challenge request. Hops are cappe
 `MAX_PAID_REDIRECTS = 30`, `requests`' own default. A hop to another origin than the endpoint is
 sent without the session's `Authorization` and `Cookie` (what `requests`' `rebuild_auth` does on a
 host change), and `Location` is read through `Session.get_redirect_target` when the session is a
-`requests.Session`. The unpaid request calls `session.get` exactly as before (no `allow_redirects`);
-a user-injected session whose `get()` does not accept `allow_redirects` is refused before paying,
-since the paid retry could not be kept off a plain-HTTP hop with it, and still gets free results.
+`requests.Session`. Each hop's scheme and origin are read from the URL as `requests` prepares it, not
+from `urlparse` of the raw `Location` (they disagree on `https://evil.example\@seller.example/x`).
+The unpaid request calls `session.get` exactly as before (no `allow_redirects`). For a
+`requests.Session` or subclass the paid hops go through `prepare_request` + `send`, never `get()`,
+so a subclass with a narrowed `get()` is paid and served. Any other session whose `get()` does not
+accept `allow_redirects` is refused before paying, and still gets free results; one that accepts the
+keyword but ignores it cannot be detected (documented in the README).
 
 Tests: `test_the_payment_hash_is_never_sent_over_a_plain_http_redirect_hop` (fails on the pre-fix
 tree, naming the leaked hash) and the control
 `test_a_paid_retry_redirected_within_https_is_still_followed_and_served`. The two test fakes that
 call `session.get` gained the `allow_redirects` keyword; a main-style session (no
 `allow_redirects`) is tested separately, plus a real `requests.Session` over a mocked adapter for the
-cross-host credential rule, the non-ASCII `Location` and the plain-HTTP refusal. Suite after, with
-`pip install -e '.[test]'` and `pip install -e '.[feeless402]'` (as CI): **89 passed, 2 skipped**.
+cross-host credential rule, the backslash-userinfo `Location`, the non-ASCII `Location`, a `Session`
+subclass with a narrowed `get()`, and the plain-HTTP refusal. Suite after, CI-style (Python 3.11,
+`pip install -e '.[test]'` then `pip install -e '.[feeless402]'`, `pytest -q`): **92 passed, 2 skipped**.
 The real-server probe above re-run against the fixed tree: `plain-HTTP origin saw X-PAYMENT: []`.
 
 ## Found, NOT changed

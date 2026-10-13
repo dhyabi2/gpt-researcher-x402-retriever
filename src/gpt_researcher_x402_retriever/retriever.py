@@ -119,39 +119,65 @@ class PayPerCallSearch(_Base):
         )
 
     def _can_refuse_redirects(self) -> bool:
-        """Whether ``session.get`` accepts ``allow_redirects=``. Checked BEFORE paying.
+        """Whether the paid retry can be sent without the session following a redirect.
 
-        The paid retry must not let the session follow a redirect on its own (that is how
-        `X-PAYMENT` reached a plain-HTTP hop). A ``get()`` that cannot be told so may or may
-        not follow redirects, and that is not knowable from here -- so such a session is
+        Checked BEFORE paying. The paid retry must not let the session follow a redirect on
+        its own (that is how `X-PAYMENT` reached a plain-HTTP hop).
+
+        A `requests.Session` (or subclass) always can: its paid hops go through
+        ``prepare_request`` + ``send(allow_redirects=False)``, never through ``get()``, so a
+        subclass that narrows or overrides ``get()`` is neither relied on nor able to break
+        the retry after the XNO has moved.
+
+        Any other session needs a ``get()`` that accepts ``allow_redirects=``. One that does
+        not may or may not follow redirects, which is not knowable from here -- so it is
         never paid with: the XNO is not sent, rather than sent and the hash then put at risk.
-        Free (200) answers still work with it.
+        Free (200) answers still work with it. A ``get()`` that accepts the keyword and then
+        ignores it cannot be detected; the README says it must honour it.
         """
-        get = getattr(self._session, "get", None)
         if isinstance(self._session, requests.Session):
             return True
+        get = getattr(self._session, "get", None)
         try:
             params = inspect.signature(get).parameters.values()
         except (TypeError, ValueError):
             return False
         return any(p.name == "allow_redirects" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
 
-    def _paid_hop(self, url: str, params: Optional[Dict[str, str]], headers: Dict[str, str], same_origin: bool):
+    def _paid_hop(self, url: str, params: Optional[Dict[str, str]], headers: Dict[str, str], block_hash: str):
         """One hop of the paid retry, never following a redirect itself.
 
-        On a hop to another origin (scheme, host, port) than the endpoint, the session's
-        credentials stay behind, as `requests`' own redirect handling (`rebuild_auth`) does:
-        no ``Authorization`` (from ``session.auth``, ``session.headers`` or netrc) and no
-        ``Cookie`` header. `X-PAYMENT` is still sent, as before: it is what the hop serves.
+        The scheme and origin are read from the URL as `requests` will actually send it
+        (``PreparedRequest.prepare_url``), not from ``urlparse`` of the raw string: the two
+        disagree on inputs such as ``https://evil.example\\@seller.example/x``, which
+        ``urlparse`` puts on ``seller.example`` and `requests` sends to ``evil.example``.
+
+        * Not HTTPS: refused before anything is sent.
+        * Another origin (scheme, host, port) than the endpoint, on a `requests.Session`:
+          the session's credentials stay behind, as `requests`' own redirect handling
+          (``rebuild_auth``) does -- no ``Authorization`` (``session.auth``,
+          ``session.headers`` or netrc) and no ``Cookie``. `X-PAYMENT` is still sent: it is
+          what the hop serves.
         """
-        if same_origin or not isinstance(self._session, requests.Session):
-            return self._session.get(url, params=params, headers=headers, timeout=self.timeout, allow_redirects=False)
+        target = _prepared_url(url, params)
+        if urlparse(target).scheme != "https" or urlparse(url).scheme.lower() != "https":
+            raise RuntimeError(
+                f"paid (block {block_hash}) and the paid request was redirected to "
+                f"{urlparse(target).scheme or 'a schemeless url'} ({target}) -- not sending the payment "
+                f"hash over a hop anyone on the path could read. Keep the hash for a refund claim."
+            )
         session = self._session
+        if not isinstance(session, requests.Session):
+            return session.get(url, params=params, headers=headers, timeout=self.timeout, allow_redirects=False)
+        same_origin = _origin(target) == _origin(_prepared_url(self.endpoint, None))
         prepared = session.prepare_request(
-            requests.Request("GET", url, params=params, headers=headers, auth=_no_auth)
+            requests.Request("GET", url, params=params, headers=headers, auth=None if same_origin else _no_auth)
         )
-        prepared.headers.pop("Authorization", None)
-        prepared.headers.pop("Cookie", None)
+        if urlparse(prepared.url).scheme != "https" or _origin(prepared.url) != _origin(target):
+            raise RuntimeError(f"paid (block {block_hash}) and the paid hop did not prepare to {target}")
+        if not same_origin:
+            prepared.headers.pop("Authorization", None)
+            prepared.headers.pop("Cookie", None)
         settings = session.merge_environment_settings(prepared.url, {}, None, None, None)
         return session.send(prepared, allow_redirects=False, timeout=self.timeout, **settings)
 
@@ -193,9 +219,8 @@ class PayPerCallSearch(_Base):
         headers = self._headers({"X-PAYMENT": block_hash})
         url: str = self.endpoint
         params: Optional[Dict[str, str]] = {"q": self._query_text()}
-        origin = _origin(self.endpoint)
         for _ in range(MAX_PAID_REDIRECTS + 1):
-            response = self._paid_hop(url, params, headers, same_origin=_origin(url) == origin)
+            response = self._paid_hop(url, params, headers, block_hash)
             if response.status_code not in _REDIRECT_CODES:
                 return response
             location = self._redirect_target(response)
@@ -203,14 +228,10 @@ class PayPerCallSearch(_Base):
                 return response
             # `requests` resolves a relative Location against the URL it asked for and
             # carries no params over: the Location is the whole of the next request.
+            # The next hop's scheme is checked in `_paid_hop`, on the URL as `requests`
+            # would send it, before the header goes anywhere.
             url = urljoin(getattr(response, "url", None) or url, location)
             params = None
-            if urlparse(url).scheme != "https":
-                raise RuntimeError(
-                    f"paid (block {block_hash}) and the paid request was redirected to "
-                    f"{urlparse(url).scheme or 'a schemeless url'} ({url}) -- not sending the payment "
-                    f"hash over a hop anyone on the path could read. Keep the hash for a refund claim."
-                )
         raise RuntimeError(
             f"paid (block {block_hash}) but the paid request was still being redirected after "
             f"{MAX_PAID_REDIRECTS} hops. Keep the hash for a refund claim."
@@ -356,6 +377,17 @@ def _install(module) -> bool:
 def _no_auth(request):
     """An explicit no-op auth, so `requests` applies neither ``session.auth`` nor netrc."""
     return request
+
+
+def _prepared_url(url: str, params: Optional[Dict[str, str]]) -> str:
+    """``url`` as `requests` would send it. Anything it cannot prepare is returned as-is
+    (and is then refused for not being HTTPS, or by the session)."""
+    prepared = requests.PreparedRequest()
+    try:
+        prepared.prepare_url(url, params)
+    except Exception:
+        return url
+    return prepared.url
 
 
 def _origin(url: str):

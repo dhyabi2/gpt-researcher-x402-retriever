@@ -870,3 +870,56 @@ def test_a_real_session_refuses_a_plain_http_paid_hop_before_sending_the_hash():
     assert search.search() == []
     assert len(adapter.sent) == 2
     assert search.last_payment == "d" * 64
+
+
+class _NarrowSession(_requests.Session):
+    """A Session subclass whose get() was narrowed to the original call shape."""
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        return super().get(url, params=params, headers=headers, timeout=timeout)
+
+
+def test_a_session_subclass_with_a_narrowed_get_is_paid_and_served_never_paid_then_crashed():
+    session = _NarrowSession()
+    session.trust_env = False
+    adapter = _RouteAdapter([
+        (402, fixture("web_search_402.json"), None),
+        (200, fixture("web_search_200.json"), None),
+    ])
+    session.mount("https://", adapter)
+    payer = RecordingPayer("b" * 64)
+    search = PayPerCallSearch("q", payer=payer, session=session, endpoint=ENDPOINT)
+    assert len(search.search()) > 0, "paid AND served: the narrowed get() is not used for the paid retry"
+    assert len(payer.offers) == 1
+    assert adapter.sent[1].headers["X-PAYMENT"] == "b" * 64
+
+
+def test_a_backslash_userinfo_location_is_judged_on_the_url_requests_actually_sends():
+    # urlparse puts this on seller.example (same origin); requests sends it to evil.example.
+    session, adapter = _real_session([
+        (402, fixture("web_search_402.json"), None),
+        (302, None, {"Location": "https://evil.example\\@seller.example/x"}),
+        (200, fixture("web_search_200.json"), None),
+    ])
+    session.auth = ("user", "secret")
+    session.headers["Authorization"] = "Bearer X"
+    session.cookies.set("sid", "s3cret")
+    search = PayPerCallSearch("q", payer=RecordingPayer("9" * 64), session=session, endpoint=ENDPOINT)
+    search.search()
+    hop_req = adapter.sent[2]
+    assert hop_req.url.startswith("https://evil.example/")
+    assert "Authorization" not in hop_req.headers
+    assert "Cookie" not in hop_req.headers
+
+
+def test_the_plain_http_refusal_is_computed_on_the_prepared_url():
+    # An upper-case scheme and host: refused, and the message names the URL as requests
+    # would have sent it (lower-cased), which is what the check was made on.
+    session, adapter = _real_session([
+        (402, fixture("web_search_402.json"), None),
+        (302, None, {"Location": "HTTP://Seller.Example/r"}),
+    ])
+    search = PayPerCallSearch("q", payer=RecordingPayer("8" * 64), session=session, endpoint=ENDPOINT)
+    with pytest.raises(RuntimeError, match=r"redirected to http \(http://seller\.example/r\)"):
+        search._fetch()
+    assert len(adapter.sent) == 2, "nothing was sent to the plain-HTTP hop"

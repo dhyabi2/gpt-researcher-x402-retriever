@@ -80,9 +80,14 @@ assignment where the instance is built. There is no environment-only setup today
    as the paid results. A paid retry redirected within HTTPS is still followed and served, up to 30
    hops (`requests`' own limit). On a hop to a different host than the endpoint, your session's
    `Authorization` (from `session.auth`, `session.headers` or netrc) and cookies are not sent, as
-   `requests` itself does on a cross-host redirect; `X-PAYMENT` is. If you inject your own `session=`,
-   its `get()` must accept `allow_redirects=` for the retriever to pay at all: one that cannot be told
-   not to follow redirects is never paid with (free answers still work). If the
+   `requests` itself does on a cross-host redirect; `X-PAYMENT` is. Each hop's scheme and host are
+   judged on the URL as `requests` will send it. If you inject a `requests.Session` (or subclass),
+   the paid retry goes through its `prepare_request` and `send(allow_redirects=False)`, so an
+   overridden `get()` is bypassed on the paid retry. Any other injected `session=` must have a
+   `get()` that accepts `allow_redirects=` for the retriever to pay at all (one that does not is
+   never paid with; free answers still work), **and it must honour `allow_redirects=False`**: a
+   `get()` that accepts the keyword and ignores it (a `**kwargs` wrapper, a response hook that
+   follows redirects) cannot be detected and would follow the hop itself. If the
    paid retry isn't served, it never pays again for that call. The hash stays on
    `retriever.last_payment` so you can take it up with the seller.
 
