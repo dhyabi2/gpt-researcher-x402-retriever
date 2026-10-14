@@ -30,7 +30,7 @@ return self._wallet.send(self._rpc, offer.pay_to, offer.amount_raw)   # payers.p
 ```
 
 `offer.amount_raw` is **integer raw**. Had `nano_pay.Wallet.send` expected a decimal XNO
-amount, this line would send 10**30 times the price — 0.0001 XNO becoming 100 billion XNO.
+amount, this line would send 10**30 times the price — 0.0001 XNO (10**26 raw) becoming 10**26 XNO.
 It takes raw. The line is correct.
 
 One real observation about CI: the install is best effort. Because of the `|| echo` fallback,
