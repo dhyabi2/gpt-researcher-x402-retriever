@@ -14,7 +14,7 @@ that moves money", and every other test stubs it. It opens with
 `pytest.importorskip("nanopy")` and `pytest.importorskip("nano_pay.wallet")`, so it runs only
 when the `feeless402` extra is installed. CI does install it: `.github/workflows/test.yml:17`
 runs `pip install -e ".[feeless402]" || echo "feeless402 unavailable; payer tests will skip"`
-(added in `d68571c`, #9), and the 10-09 note already ran these tests with the extra installed.
+(added in `bb0d7e7`, #6), and the 10-09 note already ran these tests with the extra installed.
 
 Measured on this head:
 
