@@ -5,40 +5,41 @@ spends real XNO on a stranger's 402, so the audit is spent on the decision to pa
 
 Starting point: `main` at `24f8757`. **Nothing changed this run** — no defect I could prove,
 and the three open pull requests (#12, #13, #14) already hold this week's findings. What this
-note adds is one verification the suite does not normally perform.
+note adds is a re-run of the money-path tests on this head.
 
-## The one code path that moves money was never actually run
+## The one code path that moves money, re-run
 
 `tests/test_feeless402_payer.py` exists because `Feeless402Payer.pay` is "the one code path
 that moves money", and every other test stubs it. It opens with
-`pytest.importorskip("nanopy")` and `pytest.importorskip("nano_pay.wallet")`, and the
-`feeless402` extra is **not installed in CI** — so the file has been skipping, and the
-repository's reported figure has been **76 passed, 3 skipped**.
+`pytest.importorskip("nanopy")` and `pytest.importorskip("nano_pay.wallet")`, so it runs only
+when the `feeless402` extra is installed. CI does install it: `.github/workflows/test.yml:17`
+runs `pip install -e ".[feeless402]" || echo "feeless402 unavailable; payer tests will skip"`
+(added in `d68571c`, #9), and the 10-09 note already ran these tests with the extra installed.
 
-I installed the extra (`pip install "feeless402>=0.2.9"`, resolves to `nano_pay` + `nanopy`)
-and ran the suite against the real wallet implementation:
+Measured on this head:
 
 ```
-76 passed, 3 skipped      <- as CI runs it, the money path skipped
-80 passed, 2 skipped      <- with feeless402 installed, the money path RUN
+76 passed, 3 skipped      <- locally, without the feeless402 extra
+80 passed, 2 skipped      <- with the feeless402 extra installed, as CI attempts
 ```
 
-Four tests move from skipped to passing, and the one question that mattered is answered
-first-hand rather than by reading:
+With the extra, four tests move from skipped to passing and exercise the line that matters:
 
 ```python
 return self._wallet.send(self._rpc, offer.pay_to, offer.amount_raw)   # payers.py:89
 ```
 
 `offer.amount_raw` is **integer raw**. Had `nano_pay.Wallet.send` expected a decimal XNO
-amount, this line would send 10**30 times the price — 0.0001 XNO becoming 100 billion XNO —
-and no test in CI would ever have noticed, because the only test that calls the real wallet
-was skipped. It takes raw. The line is correct.
+amount, this line would send 10**30 times the price — 0.0001 XNO becoming 100 billion XNO.
+It takes raw. The line is correct.
 
-That is worth stating plainly: the skip is a real hole in what CI proves, not a formality.
-`nanopy` also sets the process-global `decimal` precision to 40 at import, which
-`tests/test_retriever.py:414` already documents and works around, and the suite is green
-either way — so installing the extra in CI changes no other result.
+One real observation about CI: the install is best effort. Because of the `|| echo` fallback,
+if the `feeless402` install ever failed, the four payer tests would turn into skips and the
+build would still be green. That is a deliberate choice for an optional extra, and this note
+does not claim it has happened; it means a green run alone does not prove the payer tests ran —
+the skip count in the log does. `nanopy` also sets the process-global `decimal` precision to
+40 at import, which `tests/test_retriever.py:414` already documents and works around, and the
+suite is green either way.
 
 ## What else I checked
 
@@ -55,8 +56,8 @@ either way — so installing the extra in CI changes no other result.
 - `valid_nano_address` verifies the blake2b checksum, not just the shape — the only thing
   that catches one mistyped character in an address a send cannot be taken back from. Worth
   noting against `tollstile-rail-nano`, where the equivalent construction guard (#22) had to
-  implement blake2b by hand because `node:crypto` exposes no 40-bit digest; here it is four
-  lines of `hashlib`.
+  implement blake2b by hand because `node:crypto` exposes no 40-bit digest; here it is one
+  `hashlib.blake2b(..., digest_size=5)` call in a four-line check (`terms.py:55-58`).
 - `offer.resource` is attacker-controlled (`parse_challenge` takes it from the challenge
   body's `resource.url`). I traced every use: it is carried on `PaymentOffer` and read by no
   payer and no header. Nothing acts on it. No change.
@@ -67,8 +68,8 @@ either way — so installing the extra in CI changes no other result.
 
 - **No payment was made.** Everything above is against the fixtures and the local wallet; no
   XNO moved and no live seller was paid, which is the owner's call and not a routine's.
-- **Three README links could not be checked from here.** `docs.gptr.dev`,
-  `search.paypercall.dev`, `tollstile.com` and `x402.org` answer `403` to `CONNECT` through
+- **Three README link hosts could not be checked from here.** `docs.gptr.dev`,
+  `search.paypercall.dev` and `x402.org` answer `403` to `CONNECT` through
   this container's egress proxy — a network-policy denial on the allowlist, **not** evidence
   that any of them is broken. For contrast, `pypi.org/project/feeless402/`,
   `extract.paypercall.dev/.well-known/x402` and `rpc.nano.to` are reachable and answer `200`
