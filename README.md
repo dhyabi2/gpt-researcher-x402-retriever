@@ -14,7 +14,7 @@ and it only pays when you plug in a payer.
 ## Install and use
 
 ```bash
-pip install "git+https://github.com/dhyabi2/gpt-researcher-x402-retriever"
+pip install "gpt-researcher-x402-retriever @ git+https://github.com/dhyabi2/gpt-researcher-x402-retriever@v0.1.0"
 ```
 
 **`RETRIEVER=paypercall` alone is not enough, and fails quietly.** GPT Researcher resolves a
